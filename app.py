@@ -9,11 +9,12 @@ import math
 from PIL import Image
 from io import BytesIO
 from matplotlib.lines import Line2D
-from matplotlib.patches import FancyArrowPatch, Rectangle
+from matplotlib.patches import FancyArrowPatch
 from streamlit_image_coordinates import streamlit_image_coordinates
-from matplotlib.colors import Normalize, LinearSegmentedColormap
-from collections import defaultdict
 
+# =============================================================================
+# Page + Style
+# =============================================================================
 st.set_page_config(layout="wide", page_title="Pass Map Dashboard — Pressão + xT")
 
 st.markdown("""
@@ -46,36 +47,47 @@ def small_metric(label: str, value: str, delta: str | None = None):
 
 st.title("Pass Map Dashboard — Pressão + xT")
 
-# ── Constants ────────────────────────────────────────────────────────────────
+# =============================================================================
+# Constants
+# =============================================================================
 FIELD_X, FIELD_Y = 120.0, 80.0
 HALF_LINE_X = FIELD_X / 2
 FINAL_THIRD_LINE_X = 80.0
-LANE_LEFT_MIN = 53.33
-LANE_RIGHT_MAX = 26.67
-LATERAL_MIN_DIST = 12.0
-
 NX, NY = 16, 12
+
 FIG_W, FIG_H = 7.9, 5.3
 FIG_DPI = 110
 
-# cores mantendo estética
-COLOR_SUCCESS = "#c8c8c8"
-COLOR_FAIL = "#E07070"
-COLOR_XT_POS = "#2F80ED"
-ALPHA_SUCCESS = 0.09
+# Mapa (pedido)
+COLOR_FAIL_WEAK = "#E07070"      # vermelho fraco (errados)
+COLOR_POS_XT_WEAK = "#2F80ED"    # azul fraco (ΔxT > 0)
+COLOR_NONPOS_WEAK = "#A0A0A0"    # cinza fraco (ΔxT <= 0)
+ALPHA_FAIL = 0.45
+ALPHA_POS = 0.30
+ALPHA_NONPOS = 0.22
 
-PRESSURE_COLORS = {
-    "0-0": "#9CA3AF",  # sem pressão
-    "1-0": "#F59E0B",  # pressão origem
-    "0-1": "#06B6D4",  # pressão destino
-    "1-1": "#8B5CF6",  # pressão ambos
-}
-
+# xT + distância
 D_REF = 10.0
 D_SCALE = 20.0
 BONUS_CAP = 0.60
 
-# ── xT logic (adaptado da lógica do xT_actions_teste_v2) ─────────────────────
+# Bônus por pressão (pedido)
+PRESSURE_BONUS = {
+    "0-0": 0.00,  # sem bonificação
+    "1-0": 0.12,  # intermediário
+    "0-1": 0.12,  # intermediário
+    "1-1": 0.25,  # maior
+}
+PRESSURE_LABEL = {
+    "0-0": "Sem pressão",
+    "1-0": "Pressão na origem",
+    "0-1": "Pressão no destino",
+    "1-1": "Pressão em ambos",
+}
+
+# =============================================================================
+# xT Grid (mesma lógica do repositório de referência)
+# =============================================================================
 @st.cache_data(show_spinner=False)
 def compute_xt_grid(NX=16, NY=12, sub=24,
     goal_width=11.0, penalty_depth=18.5, penalty_width=45.32,
@@ -148,16 +160,17 @@ def compute_xt_grid(NX=16, NY=12, sub=24,
 
     def blur(a, rx, ry):
         H, W = a.shape
-        p = np.pad(a, ((ry,ry),(rx,rx)), mode='edge').astype(np.float64)
+        p = np.pad(a, ((ry, ry), (rx, rx)), mode="edge").astype(np.float64)
         ii = p.cumsum(0).cumsum(1)
         s = ii[2*ry:2*ry+H, 2*rx:2*rx+W].copy()
-        s += ii[:H,:W]
-        s -= ii[:H,2*rx:2*rx+W]
-        s -= ii[2*ry:2*ry+H,:W]
+        s += ii[:H, :W]
+        s -= ii[:H, 2*rx:2*rx+W]
+        s -= ii[2*ry:2*ry+H, :W]
         return s / ((2*ry+1)*(2*rx+1))
 
     w = 0.5 * (1 - np.cos(np.pi * np.clip(adist / band_width_m, 0, 1)))
     XTbl = w * XTB + (1-w) * blur(XTB, rx, ry)
+
     rf = max(1, int(round((final_blur_m/pw)/2)))
     rfy = max(1, int(round((final_blur_m/ph)/2)))
     XT = 0.85 * XTbl + 0.15 * blur(XTbl, rf, rfy)
@@ -174,22 +187,23 @@ def compute_xt_grid(NX=16, NY=12, sub=24,
 XT_GRID = compute_xt_grid()
 
 def xt_value(x, y):
-    ix = int(np.clip((x/FIELD_X)*NX, 0, NX-1))
-    iy = int(np.clip((y/FIELD_Y)*NY, 0, NY-1))
+    ix = int(np.clip((x / FIELD_X) * NX, 0, NX - 1))
+    iy = int(np.clip((y / FIELD_Y) * NY, 0, NY - 1))
     return float(XT_GRID[iy, ix])
 
 def distance_bonus(distance):
     excess = np.maximum(0.0, np.asarray(distance, dtype=float) - D_REF)
     return np.minimum(BONUS_CAP, np.log1p(excess / D_SCALE))
 
-# ── Dados de pressão enviados por você ────────────────────────────────────────
-# columns: label, x_start, y_start, x_end, y_end, pressure_tag, is_won
+# =============================================================================
+# Data (fornecido)
+# =============================================================================
 raw_pressure_passes = [
     # 1-1
     ("Seta 1", 27.09, 76.41, 56.84, 66.76, "1-1", True),
     ("Seta 1", 13.95, 77.07, 36.89, 76.57, "1-1", True),
     ("Seta 4", 36.23, 77.24, 40.38, 78.73, "1-1", True),
-    ("Seta 10", 25.26, 77.07, 39.05, 75.74, "1-1", False),  # passe errado
+    ("Seta 10", 25.26, 77.07, 39.05, 75.74, "1-1", False),
 
     # 0-0
     ("Seta 3", 28.42, 76.24, 13.29, 64.27, "0-0", True),
@@ -201,38 +215,41 @@ raw_pressure_passes = [
     # 1-0
     ("Seta 2", 31.91, 77.40, 16.78, 64.27, "1-0", True),
     ("Seta 9", 78.45, 73.25, 80.45, 73.25, "1-0", True),
-    ("Seta 11", 23.93, 77.74, 33.90, 74.91, "1-0", False),  # passe errado
+    ("Seta 11", 23.93, 77.74, 33.90, 74.91, "1-0", False),
 
     # 0-1
     ("Seta 1", 21.10, 71.42, 46.70, 70.09, "0-1", True),
 ]
 
-pressure_label_map = {
-    "0-0": "Sem pressão",
-    "1-0": "Pressão na origem",
-    "0-1": "Pressão no destino",
-    "1-1": "Pressão em ambos",
-}
-
 df = pd.DataFrame(
     raw_pressure_passes,
-    columns=["seta", "x_start", "y_start", "x_end", "y_end", "pressure_tag", "is_won"]
+    columns=["seta","x_start","y_start","x_end","y_end","pressure_tag","is_won"]
 )
 df["number"] = np.arange(1, len(df) + 1)
 df["type"] = np.where(df["is_won"], "PASS WON", "PASS LOST")
 df["outcome"] = np.where(df["is_won"], "completed", "incomplete")
-df["pressure_label"] = df["pressure_tag"].map(pressure_label_map)
+df["pressure_label"] = df["pressure_tag"].map(PRESSURE_LABEL)
 
+# xT pipeline
 df["xt_start"] = df.apply(lambda r: xt_value(r.x_start, r.y_start), axis=1)
 df["xt_end"] = df.apply(lambda r: xt_value(r.x_end, r.y_end), axis=1)
 df["delta_xt_raw"] = np.where(df["is_won"], df["xt_end"] - df["xt_start"], 0.0)
-df["pass_distance"] = np.sqrt((df.x_end-df.x_start)**2 + (df.y_end-df.y_start)**2)
+df["pass_distance"] = np.sqrt((df.x_end - df.x_start)**2 + (df.y_end - df.y_start)**2)
 df["dist_bonus"] = distance_bonus(df["pass_distance"].values)
 df["delta_xt_adj"] = np.where(df["is_won"], df["delta_xt_raw"] * (1 + df["dist_bonus"]), 0.0)
+df["pressure_bonus"] = df["pressure_tag"].map(PRESSURE_BONUS).fillna(0.0)
+df["delta_xt_final"] = np.where(df["is_won"], df["delta_xt_adj"] * (1 + df["pressure_bonus"]), 0.0)
 
-# ── Draw helpers ──────────────────────────────────────────────────────────────
+# =============================================================================
+# Helpers (draw + stats)
+# =============================================================================
 def _base_pitch():
-    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    pitch = Pitch(
+        pitch_type="statsbomb",
+        pitch_color="#1a1a2e",
+        line_color="#ffffff",
+        line_alpha=0.95
+    )
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor("#1a1a2e")
     fig.set_dpi(FIG_DPI)
@@ -242,9 +259,15 @@ def _base_pitch():
 
 def _attack_arrow(fig):
     fig.patches.append(FancyArrowPatch(
-        (0.45,0.05),(0.55,0.05), transform=fig.transFigure,
-        arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc"))
-    fig.text(0.5,0.02,"Attacking Direction",ha="center",va="center",fontsize=9,color="#cccccc")
+        (0.45, 0.05), (0.55, 0.05),
+        transform=fig.transFigure,
+        arrowstyle="-|>",
+        mutation_scale=15,
+        linewidth=2,
+        color="#cccccc"
+    ))
+    fig.text(0.5, 0.02, "Attacking Direction",
+             ha="center", va="center", fontsize=9, color="#cccccc")
 
 def _save_fig(fig):
     fig.tight_layout()
@@ -256,69 +279,80 @@ def _save_fig(fig):
 
 def draw_pass_map(df_plot: pd.DataFrame, title: str):
     fig, ax, pitch = _base_pitch()
-    pos_ref = max(float(np.percentile(df_plot[df_plot["delta_xt_adj"] > 0]["delta_xt_adj"], 90))
-                  if (df_plot["delta_xt_adj"] > 0).any() else 1.0, 1e-6)
 
     for _, row in df_plot.iterrows():
-        pcolor = PRESSURE_COLORS.get(row["pressure_tag"], "#c8c8c8")
         if not row["is_won"]:
-            color, alpha, lw = COLOR_FAIL, 0.82, 1.6
+            color = COLOR_FAIL_WEAK
+            alpha = ALPHA_FAIL
         else:
-            rel = float(np.clip(row["delta_xt_adj"] / pos_ref, 0, 1))
-            # mistura cor da pressão com intensidade de xT
-            color = pcolor if row["delta_xt_adj"] <= 0 else COLOR_XT_POS
-            alpha = 0.35 + 0.55 * rel if row["delta_xt_adj"] > 0 else 0.28
-            lw = 1.5 + 1.8 * rel
+            if float(row["delta_xt_final"]) > 0:
+                color = COLOR_POS_XT_WEAK
+                alpha = ALPHA_POS
+            else:
+                color = COLOR_NONPOS_WEAK
+                alpha = ALPHA_NONPOS
 
-        pitch.arrows(row.x_start,row.y_start,row.x_end,row.y_end,
-                     color=color,width=lw,headwidth=2.3,headlength=2.3,ax=ax,zorder=3,alpha=alpha)
-        pitch.scatter(row.x_start,row.y_start,s=45,marker="o",color=pcolor,
-                      edgecolors="white",linewidths=0.8,ax=ax,zorder=6,alpha=0.95)
+        pitch.arrows(
+            row.x_start, row.y_start, row.x_end, row.y_end,
+            color=color, width=1.55, headwidth=2.25, headlength=2.25,
+            ax=ax, zorder=3, alpha=alpha
+        )
+        pitch.scatter(
+            row.x_start, row.y_start, s=42, marker="o", color=color,
+            edgecolors="white", linewidths=0.75, ax=ax, zorder=6, alpha=alpha
+        )
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
-    leg = ax.legend(handles=[
-        Line2D([0],[0],color=PRESSURE_COLORS["0-0"], lw=2.5,label="0-0 Sem pressão", alpha=0.9),
-        Line2D([0],[0],color=PRESSURE_COLORS["1-0"], lw=2.5,label="1-0 Pressão origem", alpha=0.9),
-        Line2D([0],[0],color=PRESSURE_COLORS["0-1"], lw=2.5,label="0-1 Pressão destino", alpha=0.9),
-        Line2D([0],[0],color=PRESSURE_COLORS["1-1"], lw=2.5,label="1-1 Pressão ambos", alpha=0.9),
-        Line2D([0],[0],color=COLOR_XT_POS, lw=2.5,label="ΔxT positivo", alpha=0.9),
-        Line2D([0],[0],color=COLOR_FAIL, lw=2.5,label="Passe errado", alpha=0.9),
-    ], loc="upper left", bbox_to_anchor=(0.01,0.99), frameon=True,
-       facecolor="#1a1a2e", edgecolor="#444466", fontsize="x-small", labelspacing=0.5, borderpad=0.5)
-    for t in leg.get_texts(): t.set_color("white")
-    leg.get_frame().set_alpha(0.92)
+
+    # sem legenda por pressão (apenas por classe visual)
+    legend = ax.legend(
+        handles=[
+            Line2D([0],[0], color=COLOR_NONPOS_WEAK, lw=2.5, label="Completed (ΔxT ≤ 0)", alpha=0.80),
+            Line2D([0],[0], color=COLOR_POS_XT_WEAK, lw=2.5, label="Completed (ΔxT > 0)", alpha=0.85),
+            Line2D([0],[0], color=COLOR_FAIL_WEAK, lw=2.5, label="Incomplete", alpha=0.85),
+        ],
+        loc="upper left", bbox_to_anchor=(0.01,0.99), frameon=True,
+        facecolor="#1a1a2e", edgecolor="#444466", fontsize="x-small",
+        labelspacing=0.5, borderpad=0.5
+    )
+    for t in legend.get_texts():
+        t.set_color("white")
+    legend.get_frame().set_alpha(0.92)
+
     _attack_arrow(fig)
     return _save_fig(fig), ax, fig
 
 def compute_stats(df_stats: pd.DataFrame):
     total = len(df_stats)
-    comp = int(df_stats["is_won"].sum())
-    acc = round(comp / max(total, 1) * 100, 2)
+    completed = int(df_stats["is_won"].sum())
+    acc = round(completed / max(total, 1) * 100, 2)
 
     succ = df_stats[df_stats["is_won"]]
-    sum_xt = float(succ["delta_xt_adj"].sum()) if not succ.empty else 0.0
-    mean_xt = float(succ["delta_xt_adj"].mean()) if not succ.empty else 0.0
-    pos_xt = succ[succ["delta_xt_adj"] > 0]
-    pos_pct = round(len(pos_xt) / max(total, 1) * 100, 2)
+    sum_xt = float(succ["delta_xt_final"].sum()) if not succ.empty else 0.0
+    mean_xt = float(succ["delta_xt_final"].mean()) if not succ.empty else 0.0
+    pos_mask = succ["delta_xt_final"] > 0
+    pos_pct = round(float(pos_mask.sum()) / max(total, 1) * 100, 2)
 
     by_pressure = (
         df_stats.groupby("pressure_tag", dropna=False)
         .agg(
-            total=("number","count"),
-            completed=("is_won","sum"),
-            xt_sum=("delta_xt_adj","sum"),
-            xt_mean=("delta_xt_adj","mean"),
+            total=("number", "count"),
+            completed=("is_won", "sum"),
+            xt_sum=("delta_xt_final", "sum"),
+            xt_mean=("delta_xt_final", "mean"),
         )
         .reset_index()
     )
     by_pressure["accuracy_pct"] = np.where(
-        by_pressure["total"] > 0, by_pressure["completed"] / by_pressure["total"] * 100, 0
+        by_pressure["total"] > 0,
+        by_pressure["completed"] / by_pressure["total"] * 100,
+        0
     )
-    by_pressure["pressure_label"] = by_pressure["pressure_tag"].map(pressure_label_map)
+    by_pressure["pressure_label"] = by_pressure["pressure_tag"].map(PRESSURE_LABEL)
 
     return {
         "total": total,
-        "completed": comp,
+        "completed": completed,
         "accuracy": acc,
         "sum_xt": sum_xt,
         "mean_xt": mean_xt,
@@ -326,27 +360,36 @@ def compute_stats(df_stats: pd.DataFrame):
         "by_pressure": by_pressure.sort_values("pressure_tag")
     }
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# UI
+# =============================================================================
 col_filters, col_field, col_stats = st.columns([0.9, 2, 1], gap="large")
 
 with col_filters:
     st.markdown('<div class="filter-panel">', unsafe_allow_html=True)
+
     st.markdown("### ⚡ Pressão")
     pressure_filter = st.radio(
         "Filtro de pressão",
         ["Todos", "0-0", "1-0", "0-1", "1-1"],
-        index=0
+        index=0,
+        key="pressure_filter"
     )
+
     st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
+
     st.markdown("### 🎯 Passe")
     pass_filter = st.radio(
         "Filtro de passe",
-        ["Todos", "Completos", "Errados", "ΔxT positivo"],
-        index=0
+        ["Todos", "Completos", "Errados", "ΔxT > 0", "ΔxT ≤ 0"],
+        index=0,
+        key="pass_filter"
     )
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 df_base = df.copy()
+
 if pressure_filter != "Todos":
     df_base = df_base[df_base["pressure_tag"] == pressure_filter].reset_index(drop=True)
 
@@ -354,22 +397,25 @@ if pass_filter == "Completos":
     df_base = df_base[df_base["is_won"]].reset_index(drop=True)
 elif pass_filter == "Errados":
     df_base = df_base[~df_base["is_won"]].reset_index(drop=True)
-elif pass_filter == "ΔxT positivo":
-    df_base = df_base[(df_base["is_won"]) & (df_base["delta_xt_adj"] > 0)].reset_index(drop=True)
+elif pass_filter == "ΔxT > 0":
+    df_base = df_base[(df_base["is_won"]) & (df_base["delta_xt_final"] > 0)].reset_index(drop=True)
+elif pass_filter == "ΔxT ≤ 0":
+    df_base = df_base[(df_base["is_won"]) & (df_base["delta_xt_final"] <= 0)].reset_index(drop=True)
 
 with col_field:
     st.caption("Clique no ponto de origem para inspecionar o passe.")
-    img_obj, ax, fig = draw_pass_map(df_base, "Passes por Pressão + xT")
-    click = streamlit_image_coordinates(img_obj, width=780, key="pm_map_pressure")
 
+    img_obj, ax, fig = draw_pass_map(df_base, "Pass Map — Pressão + xT")
+    click = streamlit_image_coordinates(img_obj, width=780, key="pm_map")
     selected_pass = None
+
     if click is not None and len(df_base) > 0:
         rw, rh = img_obj.size
         px = click["x"] * (rw / click["width"])
         py = click["y"] * (rh / click["height"])
         fx, fy = ax.transData.inverted().transform((px, rh - py))
         df_sel = df_base.copy()
-        df_sel["_dist"] = np.sqrt((df_sel.x_start-fx)**2 + (df_sel.y_start-fy)**2)
+        df_sel["_dist"] = np.sqrt((df_sel.x_start - fx)**2 + (df_sel.y_start - fy)**2)
         cands = df_sel[df_sel["_dist"] < 5.0].sort_values("_dist")
         if not cands.empty:
             selected_pass = cands.iloc[0]
@@ -380,30 +426,38 @@ with col_field:
     if selected_pass is None:
         st.info("Clique em um passe no mapa para ver detalhes.")
     else:
-        ok = "✅ Completo" if selected_pass["is_won"] else "❌ Errado"
+        status = "✅ Completo" if selected_pass["is_won"] else "❌ Errado"
         st.success(
-            f"{selected_pass['seta']} — {ok} | {selected_pass['pressure_tag']} ({selected_pass['pressure_label']})"
+            f"{selected_pass['seta']} — {status} | {selected_pass['pressure_tag']} ({selected_pass['pressure_label']})"
         )
         c1, c2 = st.columns(2)
         c1.write(f"**Origem:** ({selected_pass.x_start:.2f}, {selected_pass.y_start:.2f})")
         c2.write(f"**Destino:** ({selected_pass.x_end:.2f}, {selected_pass.y_end:.2f})")
+
         c3, c4 = st.columns(2)
         c3.metric("xT início", f"{selected_pass.xt_start:.4f}")
         c4.metric("xT fim", f"{selected_pass.xt_end:.4f}")
+
         c5, c6 = st.columns(2)
-        c5.metric("ΔxT ajustado", f"{selected_pass.delta_xt_adj:.4f}")
+        c5.metric("ΔxT final", f"{selected_pass.delta_xt_final:.4f}")
         c6.metric("Distância", f"{selected_pass.pass_distance:.1f} m")
 
     with st.expander("📊 Full Pass Data Table", expanded=False):
         cols = [
-            "number","seta","type","pressure_tag","pressure_label","x_start","y_start","x_end","y_end",
-            "xt_start","xt_end","delta_xt_raw","dist_bonus","delta_xt_adj","pass_distance"
+            "number","seta","type","pressure_tag","pressure_label",
+            "x_start","y_start","x_end","y_end",
+            "xt_start","xt_end","delta_xt_raw","dist_bonus",
+            "pressure_bonus","delta_xt_adj","delta_xt_final","pass_distance"
         ]
         st.dataframe(
             df_base[cols].style.format({
-                "x_start":"{:.2f}","y_start":"{:.2f}","x_end":"{:.2f}","y_end":"{:.2f}",
-                "xt_start":"{:.4f}","xt_end":"{:.4f}","delta_xt_raw":"{:.4f}",
-                "dist_bonus":"{:.3f}","delta_xt_adj":"{:.4f}","pass_distance":"{:.1f}"
+                "x_start":"{:.2f}","y_start":"{:.2f}",
+                "x_end":"{:.2f}","y_end":"{:.2f}",
+                "xt_start":"{:.4f}","xt_end":"{:.4f}",
+                "delta_xt_raw":"{:.4f}","dist_bonus":"{:.3f}",
+                "pressure_bonus":"{:.2f}",
+                "delta_xt_adj":"{:.4f}","delta_xt_final":"{:.4f}",
+                "pass_distance":"{:.1f}"
             }),
             use_container_width=True,
             height=350
@@ -414,23 +468,25 @@ with col_stats:
 
     with st.expander("📋 General Statistics", expanded=True):
         st.markdown('<div class="stats-section-title">Overview</div>', unsafe_allow_html=True)
-        r1,r2,r3 = st.columns(3)
+        r1, r2, r3 = st.columns(3)
         with r1: small_metric("Total", f"{s['total']}")
         with r2: small_metric("Completos", f"{s['completed']}")
         with r3: small_metric("Acurácia", f"{s['accuracy']:.1f}%")
 
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
-        st.markdown('<div class="stats-section-title">xT</div>', unsafe_allow_html=True)
-        x1,x2,x3 = st.columns(3)
+        st.markdown('<div class="stats-section-title">xT (final)</div>', unsafe_allow_html=True)
+        x1, x2, x3 = st.columns(3)
         with x1: small_metric("Σ ΔxT", f"{s['sum_xt']:.3f}")
         with x2: small_metric("Média ΔxT", f"{s['mean_xt']:.3f}")
         with x3: small_metric("% ΔxT > 0", f"{s['pos_pct']:.1f}%")
 
     with st.expander("🧩 Por Cenário de Pressão", expanded=True):
         for _, row in s["by_pressure"].iterrows():
-            st.markdown(f"<div class='stats-section-title'>{row['pressure_tag']} — {row['pressure_label']}</div>",
-                        unsafe_allow_html=True)
-            a,b,c = st.columns(3)
+            st.markdown(
+                f"<div class='stats-section-title'>{row['pressure_tag']} — {row['pressure_label']}</div>",
+                unsafe_allow_html=True
+            )
+            a, b, c = st.columns(3)
             with a: small_metric("Total", f"{int(row['total'])}")
             with b: small_metric("Acurácia", f"{row['accuracy_pct']:.1f}%")
             with c: small_metric("Σ ΔxT", f"{float(row['xt_sum']):.3f}")
@@ -438,4 +494,7 @@ with col_stats:
 
     st.caption(
         "0-0 = sem pressão · 1-0 = pressão na origem · 0-1 = pressão no destino · 1-1 = pressão em ambos"
+    )
+    st.caption(
+        "Mapa: cinza fraco = ΔxT ≤ 0 · azul fraco = ΔxT > 0 · vermelho fraco = passe errado"
     )
