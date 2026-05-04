@@ -13,6 +13,7 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 from collections import defaultdict
 import math
+from scipy.ndimage import gaussian_filter
 
 st.set_page_config(layout="wide", page_title="Action Map - Caleb Simmons")
 
@@ -82,15 +83,16 @@ LANE_RIGHT_MAX     = 26.67
 NX, NY             = 16, 12
 LATERAL_MIN_DIST   = 12.0
 D_REF, D_SCALE, BONUS_CAP = 10.0, 20.0, 0.60
-FIG_W, FIG_H, FIG_DPI = 7.9, 5.3, 110
 
-# Top-15 colormap: soft cream-yellow → warm orange → dark red
+# All maps share the same figure size
+FIG_W, FIG_H = 9.2, 6.1
+FIG_DPI      = 130
+
 CMAP_TOP15 = LinearSegmentedColormap.from_list(
     "top15", ["#FEF3C7", "#FCD34D", "#FB923C", "#EF4444", "#7F1D1D"]
 )
 NORM_TOP15 = Normalize(vmin=0.1, vmax=0.5)
 
-# Density heatmap colormap: near-black → deep purple → royal blue → teal → orange → bright yellow
 CMAP_DENSITY = LinearSegmentedColormap.from_list(
     "density",
     ["#04000f", "#120040", "#2e0064", "#1a198e", "#1264aa",
@@ -114,62 +116,50 @@ def compute_xt_grid(NX=16, NY=12, sub=24,
     ANGLE_WEIGHT=0.50, ANGLE_POWER=1.4, BASE_ANGLE_WEIGHT=0.40):
 
     ncols_hr = NX * sub; nrows_hr = NY * sub
-    xe = np.linspace(0, FIELD_X, ncols_hr + 1); ye = np.linspace(0, FIELD_Y, nrows_hr + 1)
-    xc = (xe[:-1] + xe[1:]) / 2; yc_arr = (ye[:-1] + ye[1:]) / 2
+    xe = np.linspace(0, FIELD_X, ncols_hr+1); ye = np.linspace(0, FIELD_Y, nrows_hr+1)
+    xc = (xe[:-1]+xe[1:])/2; yc_arr = (ye[:-1]+ye[1:])/2
     Xc, Yc = np.meshgrid(xc, yc_arr)
-    xp = 0.01 + (Xc / FIELD_X) * 0.99
-    yc = 1.0 - np.abs((Yc / FIELD_Y) - 0.5) * 2.0
-    BASE = xp * (0.8 + 0.2 * yc)
-    BASE = (BASE - BASE.min()) / (BASE.max() - BASE.min() + 1e-12)
-    cy = FIELD_Y / 2.0
-    fv = [(FIELD_X, cy-goal_width/2), (FIELD_X-penalty_depth, cy-penalty_width/2),
-          (FIELD_X-penalty_depth, cy+penalty_width/2), (FIELD_X, cy+goal_width/2)]
+    xp = 0.01+(Xc/FIELD_X)*0.99; yc = 1.0-np.abs((Yc/FIELD_Y)-0.5)*2.0
+    BASE = xp*(0.8+0.2*yc); BASE = (BASE-BASE.min())/(BASE.max()-BASE.min()+1e-12)
+    cy = FIELD_Y/2.0
+    fv = [(FIELD_X,cy-goal_width/2),(FIELD_X-penalty_depth,cy-penalty_width/2),
+          (FIELD_X-penalty_depth,cy+penalty_width/2),(FIELD_X,cy+goal_width/2)]
     bpts = []
     for i in range(len(fv)):
-        a, b = fv[i], fv[(i+1) % len(fv)]
-        dx, dy = b[0]-a[0], b[1]-a[1]
-        n = max(2, int(round(math.hypot(dx, dy) / 0.5)))
-        for t in np.linspace(0, 1, n, endpoint=False):
-            bpts.append((a[0]+dx*t, a[1]+dy*t))
+        a,b = fv[i],fv[(i+1)%len(fv)]; dx,dy = b[0]-a[0],b[1]-a[1]
+        n = max(2,int(round(math.hypot(dx,dy)/0.5)))
+        for t in np.linspace(0,1,n,endpoint=False): bpts.append((a[0]+dx*t,a[1]+dy*t))
     bpts = np.array(bpts)
-    fX = Xc.ravel(); fY = Yc.ravel()
-    md2 = np.full(fX.size, np.inf)
-    for bp in bpts:
-        np.minimum(md2, (fX-bp[0])**2 + (fY-bp[1])**2, out=md2)
+    fX=Xc.ravel(); fY=Yc.ravel(); md2=np.full(fX.size,np.inf)
+    for bp in bpts: np.minimum(md2,(fX-bp[0])**2+(fY-bp[1])**2,out=md2)
     adist = np.sqrt(md2).reshape(Xc.shape)
-    infl = np.clip((1 - np.clip(adist/FUNNEL_INFLUENCE_RANGE, 0, 1))**FUNNEL_POWER, 0, 1)
-    D = np.hypot(FIELD_X-Xc, cy-Yc)
-    prox = 1 - np.clip(D / np.hypot(FIELD_X, FIELD_Y/2), 0, 1)
-    cent = 1 - np.clip(np.abs((Yc-cy)/cy), 0, 1)
-    ub = np.clip((prox_w*np.clip(prox**internal_prox_power,0,1) +
-                  central_w*np.clip(cent**internal_central_power,0,1)) * (1+center_boost*prox), 0, 1)
+    infl = np.clip((1-np.clip(adist/FUNNEL_INFLUENCE_RANGE,0,1))**FUNNEL_POWER,0,1)
+    D = np.hypot(FIELD_X-Xc,cy-Yc)
+    prox = 1-np.clip(D/np.hypot(FIELD_X,FIELD_Y/2),0,1)
+    cent = 1-np.clip(np.abs((Yc-cy)/cy),0,1)
+    ub = np.clip((prox_w*np.clip(prox**internal_prox_power,0,1)+
+                  central_w*np.clip(cent**internal_central_power,0,1))*(1+center_boost*prox),0,1)
     v1x=FIELD_X-Xc; v1y=(cy+goal_width/2)-Yc; v2x=FIELD_X-Xc; v2y=(cy-goal_width/2)-Yc
-    ca = np.clip((v1x*v2x+v1y*v2y)/(np.hypot(v1x,v1y)*np.hypot(v2x,v2y)+1e-12),-1,1)
-    ang = np.arccos(ca)
-    af = np.clip((ang/(ang.max()+1e-12))**ANGLE_POWER, 0, 1)
-    ub = np.clip(ub*((1-ANGLE_WEIGHT)+ANGLE_WEIGHT*af), 0, 1)
-    Bc = BASE*((1-BASE_ANGLE_WEIGHT)+BASE_ANGLE_WEIGHT*af)
-    Bc = (Bc-Bc.min())/(Bc.max()-Bc.min()+1e-12)
-    XTB = Bc + infl*BASE_BOOST_WEIGHT*ub
-    pw = FIELD_X/ncols_hr; ph = FIELD_Y/nrows_hr
-    rx = max(1,int(round((blur_window_m/pw)/2))); ry = max(1,int(round((blur_window_m/ph)/2)))
-    def blur(a, rx, ry):
-        H, W = a.shape
-        p = np.pad(a,((ry,ry),(rx,rx)),mode='edge').astype(np.float64)
-        ii = p.cumsum(0).cumsum(1)
-        s = ii[2*ry:2*ry+H, 2*rx:2*rx+W].copy()
-        s += ii[:H,:W]; s -= ii[:H,2*rx:2*rx+W]; s -= ii[2*ry:2*ry+H,:W]
+    ca=np.clip((v1x*v2x+v1y*v2y)/(np.hypot(v1x,v1y)*np.hypot(v2x,v2y)+1e-12),-1,1)
+    ang=np.arccos(ca); af=np.clip((ang/(ang.max()+1e-12))**ANGLE_POWER,0,1)
+    ub=np.clip(ub*((1-ANGLE_WEIGHT)+ANGLE_WEIGHT*af),0,1)
+    Bc=BASE*((1-BASE_ANGLE_WEIGHT)+BASE_ANGLE_WEIGHT*af)
+    Bc=(Bc-Bc.min())/(Bc.max()-Bc.min()+1e-12); XTB=Bc+infl*BASE_BOOST_WEIGHT*ub
+    pw=FIELD_X/ncols_hr; ph=FIELD_Y/nrows_hr
+    rx=max(1,int(round((blur_window_m/pw)/2))); ry=max(1,int(round((blur_window_m/ph)/2)))
+    def blur(a,rx,ry):
+        H,W=a.shape; p=np.pad(a,((ry,ry),(rx,rx)),mode='edge').astype(np.float64)
+        ii=p.cumsum(0).cumsum(1); s=ii[2*ry:2*ry+H,2*rx:2*rx+W].copy()
+        s+=ii[:H,:W]; s-=ii[:H,2*rx:2*rx+W]; s-=ii[2*ry:2*ry+H,:W]
         return s/((2*ry+1)*(2*rx+1))
-    w = 0.5*(1-np.cos(np.pi*np.clip(adist/band_width_m,0,1)))
-    XTbl = w*XTB + (1-w)*blur(XTB,rx,ry)
+    w=0.5*(1-np.cos(np.pi*np.clip(adist/band_width_m,0,1)))
+    XTbl=w*XTB+(1-w)*blur(XTB,rx,ry)
     rf=max(1,int(round((final_blur_m/pw)/2))); rfy=max(1,int(round((final_blur_m/ph)/2)))
-    XT = 0.85*XTbl + 0.15*blur(XTbl,rf,rfy)
-    XT = (XT-XT.min())/(XT.max()-XT.min()+1e-12)
-    XTc = np.zeros((NY,NX))
+    XT=0.85*XTbl+0.15*blur(XTbl,rf,rfy); XT=(XT-XT.min())/(XT.max()-XT.min()+1e-12)
+    XTc=np.zeros((NY,NX))
     for iy in range(NY):
-        for ix in range(NX):
-            XTc[iy,ix] = XT[iy*sub:(iy+1)*sub, ix*sub:(ix+1)*sub].mean()
-    XTc = (XTc-XTc.min())/(XTc.max()-XTc.min()+1e-12)
+        for ix in range(NX): XTc[iy,ix]=XT[iy*sub:(iy+1)*sub,ix*sub:(ix+1)*sub].mean()
+    XTc=(XTc-XTc.min())/(XTc.max()-XTc.min()+1e-12)
     return XTc, XT
 
 XT_GRID, _ = compute_xt_grid()
@@ -257,64 +247,57 @@ matches_data = {
 # Build DataFrames
 # =============================================================================
 def classify_action_direction(x0, y0, x1, y1):
-    dx, dy = x1-x0, y1-y0
-    dist = np.sqrt(dx**2+dy**2)
-    ang = np.degrees(np.arctan2(abs(dy), dx))
-    if ang <= 45:   return 'forward'
-    if ang >= 135:  return 'backward'
-    return 'lateral' if dist > LATERAL_MIN_DIST else ('forward' if dx >= 0 else 'backward')
+    dx,dy = x1-x0,y1-y0; dist=np.sqrt(dx**2+dy**2)
+    ang=np.degrees(np.arctan2(abs(dy),dx))
+    if ang<=45:  return 'forward'
+    if ang>=135: return 'backward'
+    return 'lateral' if dist>LATERAL_MIN_DIST else ('forward' if dx>=0 else 'backward')
 
 def recompute_bonus(df):
-    df = df.copy()
-    excess = np.maximum(0.0, df['action_distance'].values - D_REF)
-    df['dist_bonus']     = np.minimum(BONUS_CAP, np.log1p(excess / D_SCALE))
-    df['delta_xt_adj']   = np.where(df['outcome']=='successful', df['delta_xt']*(1.0+df['dist_bonus']), 0.0)
+    df=df.copy()
+    excess=np.maximum(0.0,df['action_distance'].values-D_REF)
+    df['dist_bonus']   =np.minimum(BONUS_CAP,np.log1p(excess/D_SCALE))
+    df['delta_xt_adj'] =np.where(df['outcome']=='successful',df['delta_xt']*(1.0+df['dist_bonus']),0.0)
     return df
 
 dfs_by_match = {}
 for match_name, events in matches_data.items():
-    dfm = pd.DataFrame(events, columns=['type','x_start','y_start','x_end','y_end','video'])
-    dfm['match']           = match_name
-    dfm['number']          = np.arange(1, len(dfm)+1)
-    dfm['is_won']          = dfm['type'].str.contains('WON', case=False)
-    dfm['outcome']         = np.where(dfm['is_won'], 'successful', 'failed')
-    dfm['direction']       = dfm.apply(lambda r: classify_action_direction(r.x_start,r.y_start,r.x_end,r.y_end), axis=1)
-    dfm['is_forward']      = dfm['direction'] == 'forward'
-    dfm['is_backward']     = dfm['direction'] == 'backward'
-    dfm['is_lateral']      = dfm['direction'] == 'lateral'
-    dfm['xt_start']        = dfm.apply(lambda r: xt_value(r.x_start, r.y_start), axis=1)
-    dfm['xt_end']          = dfm.apply(lambda r: xt_value(r.x_end,   r.y_end),   axis=1)
-    dfm['delta_xt']        = np.where(dfm['outcome']=='successful', dfm['xt_end']-dfm['xt_start'], 0.0)
-    dfm['action_distance'] = np.sqrt((dfm.x_end-dfm.x_start)**2+(dfm.y_end-dfm.y_start)**2)
-    dfm['dist_bonus']      = distance_bonus(dfm['action_distance'].values)
-    dfm['delta_xt_adj']    = np.where(dfm['outcome']=='successful', dfm['delta_xt']*(1+dfm['dist_bonus']), 0.0)
-    dfs_by_match[match_name] = dfm
+    dfm=pd.DataFrame(events,columns=['type','x_start','y_start','x_end','y_end','video'])
+    dfm['match']=match_name; dfm['number']=np.arange(1,len(dfm)+1)
+    dfm['is_won']=dfm['type'].str.contains('WON',case=False)
+    dfm['outcome']=np.where(dfm['is_won'],'successful','failed')
+    dfm['direction']=dfm.apply(lambda r:classify_action_direction(r.x_start,r.y_start,r.x_end,r.y_end),axis=1)
+    dfm['is_forward']=dfm['direction']=='forward'; dfm['is_backward']=dfm['direction']=='backward'
+    dfm['is_lateral']=dfm['direction']=='lateral'
+    dfm['xt_start']=dfm.apply(lambda r:xt_value(r.x_start,r.y_start),axis=1)
+    dfm['xt_end']  =dfm.apply(lambda r:xt_value(r.x_end,  r.y_end),  axis=1)
+    dfm['delta_xt']=np.where(dfm['outcome']=='successful',dfm['xt_end']-dfm['xt_start'],0.0)
+    dfm['action_distance']=np.sqrt((dfm.x_end-dfm.x_start)**2+(dfm.y_end-dfm.y_start)**2)
+    dfm['dist_bonus']=distance_bonus(dfm['action_distance'].values)
+    dfm['delta_xt_adj']=np.where(dfm['outcome']=='successful',dfm['delta_xt']*(1+dfm['dist_bonus']),0.0)
+    dfs_by_match[match_name]=dfm
 
-df_all = pd.concat(dfs_by_match.values(), ignore_index=True)
-full_data = {'All Matches': df_all}
-full_data.update(dfs_by_match)
+df_all=pd.concat(dfs_by_match.values(),ignore_index=True)
+full_data={'All Matches':df_all}; full_data.update(dfs_by_match)
 
 # =============================================================================
 # Stats
 # =============================================================================
 def compute_stats(df):
-    total       = len(df)
-    successful  = int(df['is_won'].sum())
-    accuracy    = (successful/total*100) if total else 0.0
-    succ_mask   = df['outcome']=='successful'
-    sum_dxt     = float(df.loc[succ_mask,'delta_xt_adj'].sum())  if succ_mask.any() else 0.0
-    pos_mask    = succ_mask & (df['delta_xt_adj']>0)
-    pos_count   = int(pos_mask.sum())
-    pos_mean    = float(df.loc[pos_mask,'delta_xt_adj'].mean())  if pos_count else 0.0
-    pos_pct     = (pos_count/total*100) if total else 0.0
-    top15_df    = df.loc[pos_mask].sort_values('delta_xt_adj',ascending=False).head(15)
-    top15_sum   = float(top15_df['delta_xt_adj'].sum())   if not top15_df.empty else 0.0
-    top15_mean  = float(top15_df['delta_xt_adj'].mean())  if not top15_df.empty else 0.0
-    xt_end_sum  = float(df.loc[succ_mask,'xt_end'].sum()) if succ_mask.any() else 0.0
-    xt_end_mean = float(df.loc[succ_mask,'xt_end'].mean())if succ_mask.any() else 0.0
-    fail_mask   = df['outcome']=='failed'
-    fail_count  = int(fail_mask.sum())
-    fail_xt_sum = float((1.0-df.loc[fail_mask,'xt_end']).sum()) if fail_count else 0.0
+    total=len(df); successful=int(df['is_won'].sum())
+    accuracy=(successful/total*100) if total else 0.0
+    succ_mask=df['outcome']=='successful'
+    sum_dxt=float(df.loc[succ_mask,'delta_xt_adj'].sum()) if succ_mask.any() else 0.0
+    pos_mask=succ_mask&(df['delta_xt_adj']>0); pos_count=int(pos_mask.sum())
+    pos_mean=float(df.loc[pos_mask,'delta_xt_adj'].mean()) if pos_count else 0.0
+    pos_pct=(pos_count/total*100) if total else 0.0
+    top15_df=df.loc[pos_mask].sort_values('delta_xt_adj',ascending=False).head(15)
+    top15_sum =float(top15_df['delta_xt_adj'].sum())  if not top15_df.empty else 0.0
+    top15_mean=float(top15_df['delta_xt_adj'].mean()) if not top15_df.empty else 0.0
+    xt_end_sum =float(df.loc[succ_mask,'xt_end'].sum())  if succ_mask.any() else 0.0
+    xt_end_mean=float(df.loc[succ_mask,'xt_end'].mean()) if succ_mask.any() else 0.0
+    fail_mask=df['outcome']=='failed'; fail_count=int(fail_mask.sum())
+    fail_xt_sum=float((1.0-df.loc[fail_mask,'xt_end']).sum()) if fail_count else 0.0
     return {
         'total':total,'successful':successful,'failed':fail_count,
         'accuracy':round(accuracy,2),
@@ -326,101 +309,103 @@ def compute_stats(df):
     }
 
 # =============================================================================
-# Drawing helpers
+# Drawing helpers — shared pitch factory
 # =============================================================================
-def _attack_arrow_fig(fig, ax):
-    ax_pos = ax.get_position()
-    cx = (ax_pos.x0 + ax_pos.x1) / 2
-    sm = ax_pos.y0 - 0.022
+def _base_pitch(bg='#1a1a2e', line_alpha=0.95):
+    pitch = Pitch(pitch_type='statsbomb', pitch_color=bg,
+                  line_color='#ffffff', line_alpha=line_alpha)
+    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    fig.set_facecolor(bg); fig.set_dpi(FIG_DPI)
+    return fig, ax, pitch
+
+def _attack_arrow(fig, ax):
+    ap = ax.get_position(); cx=(ap.x0+ap.x1)/2; sm=ap.y0-0.022
     fig.patches.append(FancyArrowPatch(
-        (cx-0.055, sm),(cx+0.055, sm), transform=fig.transFigure,
-        arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
-    fig.text(cx, sm-0.007,'Attack Direction', ha='center', va='top',
-             transform=fig.transFigure, fontsize=8.5, color='#cccccc')
+        (cx-0.055,sm),(cx+0.055,sm),transform=fig.transFigure,
+        arrowstyle='-|>',mutation_scale=13,linewidth=1.8,color='#cccccc'))
+    fig.text(cx,sm-0.007,'Attack Direction',ha='center',va='top',
+             transform=fig.transFigure,fontsize=8.5,color='#cccccc')
 
-def _draw_comet(ax, x0, y0, x1, y1, color, base_alpha, n_segs=14):
-    """Comet effect: faint tail at origin → bright head at destination."""
-    ts = np.linspace(0.0, 1.0, n_segs+1)
-    for i in range(n_segs):
-        t0, t1  = ts[i], ts[i+1]
-        xa = x0 + (x1-x0)*t0;  ya = y0 + (y1-y0)*t0
-        xb = x0 + (x1-x0)*t1;  yb = y0 + (y1-y0)*t1
-        progress   = (t0+t1)/2.0
-        # alpha: near-zero at origin, scaling to base_alpha at head
-        seg_alpha  = base_alpha * (0.04 + 0.96*progress)
-        lw         = 0.45 + 2.85 * progress * (0.35 + 0.65*base_alpha)
-        ax.plot([xa,xb],[ya,yb], color=color, linewidth=lw,
-                alpha=min(1.0, seg_alpha), zorder=4, solid_capstyle='round')
-    # Tiny origin dot
-    dot_s = 5 + 10*base_alpha
-    ax.scatter([x0],[y0], s=dot_s, marker='o', c=[color],
-               edgecolors='white', linewidths=0.25, alpha=base_alpha*0.55, zorder=6)
-    # Head dot
-    head_s = 18 + 22*base_alpha
-    ax.scatter([x1],[y1], s=head_s, marker='o', c=[color],
-               edgecolors='white', linewidths=0.4, alpha=min(1.0, base_alpha+0.08), zorder=7)
+def _save_fig(fig):
+    fig.tight_layout(); fig.canvas.draw()
+    buf=BytesIO()
+    fig.savefig(buf,format='png',dpi=FIG_DPI,facecolor=fig.get_facecolor(),bbox_inches='tight')
+    buf.seek(0); return Image.open(buf)
 
+# =============================================================================
+# Arrow drawing — soft, smooth, alpha-scaled
+# =============================================================================
+def _draw_soft_arrow(pitch, ax, x0, y0, x1, y1, color, alpha):
+    """
+    Single smooth arrow using mplsoccer pitch.arrows with:
+    - width & alpha that scale with the given base alpha
+    - a subtle scatter dot at origin
+    """
+    width     = 1.20 + 1.60 * alpha   # thinner for low ΔxT, wider for high
+    hw        = width * 1.55
+    hl        = width * 1.55
+
+    pitch.arrows(x0, y0, x1, y1,
+                 color=color, width=width, headwidth=hw, headlength=hl,
+                 ax=ax, zorder=4, alpha=alpha)
+
+    dot_s = 10 + 20 * alpha
+    pitch.scatter(x0, y0, s=dot_s, marker='o', color=color,
+                  edgecolors='white', linewidths=0.5,
+                  ax=ax, zorder=6, alpha=alpha * 0.75)
+
+# =============================================================================
+# Top-15 map
+# =============================================================================
 def draw_top15_map(df, title, selected_num=None):
-    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e',
-                  line_color='#ffffff', line_alpha=0.95)
-    fig, ax = pitch.draw(figsize=(8.6, 6.2))
-    fig.set_facecolor('#1a1a2e')
-    fig.set_dpi(145)
-
-    # Final-third: white dashed subtle
-    ax.axvline(x=FINAL_THIRD_LINE_X, color='#e0e0e0', lw=1.1, alpha=0.20, linestyle='--')
-    ax.axvline(x=HALF_LINE_X,        color='#ffffff',  lw=0.6, alpha=0.10, linestyle='--')
+    fig, ax, pitch = _base_pitch()
+    ax.axvline(x=FINAL_THIRD_LINE_X, color='#e2e8f0', lw=1.15, alpha=0.22, linestyle='--')
+    ax.axvline(x=HALF_LINE_X,        color='#ffffff',  lw=0.6,  alpha=0.10, linestyle='--')
 
     top15 = (
-        df[(df['outcome']=='successful') & (df['delta_xt_adj']>0)]
-        .sort_values('delta_xt_adj', ascending=False).head(15)
+        df[(df['outcome']=='successful')&(df['delta_xt_adj']>0)]
+        .sort_values('delta_xt_adj',ascending=False).head(15)
         .copy().reset_index(drop=True)
     )
     top15['rank'] = np.arange(1, len(top15)+1)
 
     if not top15.empty:
-        dxt_vals = top15['delta_xt_adj'].values
-        norm_range = max(dxt_vals.max() - dxt_vals.min(), 1e-6)
+        dxt_vals  = top15['delta_xt_adj'].values
+        dxt_range = max(dxt_vals.max()-dxt_vals.min(), 1e-6)
 
         for _, row in top15.iterrows():
             val   = float(row['delta_xt_adj'])
             color = CMAP_TOP15(NORM_TOP15(np.clip(val, 0.1, 0.5)))
-            # alpha: scales smoothly 0.28 → 0.96 across the top-15 range
-            t_norm    = float((val - dxt_vals.min()) / norm_range)
-            base_alpha = 0.28 + 0.68 * t_norm
+            t_n   = float((val-dxt_vals.min())/dxt_range)
+            alpha = 0.28 + 0.68 * t_n          # soft fade for low ΔxT
 
-            is_sel = selected_num is not None and int(row['number']) == selected_num
+            is_sel = selected_num is not None and int(row['number'])==selected_num
             if is_sel:
-                color      = '#00f0ff'
-                base_alpha = 1.0
+                color = '#00f0ff'; alpha = 1.0
 
-            _draw_comet(ax, float(row.x_start), float(row.y_start),
-                        float(row.x_end),   float(row.y_end),
-                        color, base_alpha)
+            _draw_soft_arrow(pitch, ax,
+                             float(row.x_start), float(row.y_start),
+                             float(row.x_end),   float(row.y_end),
+                             color, alpha)
 
     ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
-
-    # Legend
     leg = ax.legend(handles=[
-        Line2D([0],[0], color=CMAP_TOP15(NORM_TOP15(0.12)), lw=2.5, label='ΔxT ≈ 0.10–0.20', alpha=0.85),
-        Line2D([0],[0], color=CMAP_TOP15(NORM_TOP15(0.30)), lw=2.5, label='ΔxT ≈ 0.30',       alpha=0.90),
-        Line2D([0],[0], color=CMAP_TOP15(NORM_TOP15(0.48)), lw=2.5, label='ΔxT ≈ 0.40–0.50', alpha=0.95),
-        Line2D([0],[0], color='#00f0ff',                   lw=2.5, label='Selected',            alpha=1.0),
+        Line2D([0],[0],color=CMAP_TOP15(NORM_TOP15(0.12)),lw=2.5,label='ΔxT 0.10–0.20',alpha=0.75),
+        Line2D([0],[0],color=CMAP_TOP15(NORM_TOP15(0.30)),lw=2.5,label='ΔxT ≈ 0.30',   alpha=0.88),
+        Line2D([0],[0],color=CMAP_TOP15(NORM_TOP15(0.48)),lw=2.5,label='ΔxT 0.40–0.50',alpha=1.00),
+        Line2D([0],[0],color='#00f0ff',                  lw=2.5,label='Selected',        alpha=1.00),
     ], loc='upper left', bbox_to_anchor=(0.01,0.99), frameon=True,
        facecolor='#1a1a2e', edgecolor='#444466', fontsize='x-small',
        labelspacing=0.45, borderpad=0.5)
     for t in leg.get_texts(): t.set_color('white')
     leg.get_frame().set_alpha(0.92)
 
-    _attack_arrow_fig(fig, ax)
+    _attack_arrow(fig, ax)
+    return _save_fig(fig), ax, fig, top15
 
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=145, facecolor=fig.get_facecolor(), bbox_inches='tight')
-    buf.seek(0)
-    return Image.open(buf), ax, fig, top15
-
-
-# ── Zone corridor heatmap (completed passes only) ─────────────────────────────
+# =============================================================================
+# Zone corridor heatmap (completed, destination)
+# =============================================================================
 def _zone_bins():
     return np.linspace(0, FIELD_X, 7), np.array([0.0, LANE_RIGHT_MAX, LANE_LEFT_MIN, FIELD_Y])
 
@@ -428,145 +413,128 @@ def _zone_counts(df_s, x_col, y_col):
     x_bins, y_bins = _zone_bins()
     counts = np.zeros((3,6), dtype=int)
     if df_s.empty: return counts
-    ix = np.clip(np.searchsorted(x_bins, df_s[x_col].to_numpy(), side='right')-1, 0, 5)
-    iy = np.clip(np.searchsorted(y_bins, df_s[y_col].to_numpy(), side='right')-1, 0, 2)
-    for cx, cy in zip(ix, iy): counts[cy, cx] += 1
+    ix=np.clip(np.searchsorted(x_bins,df_s[x_col].to_numpy(),side='right')-1,0,5)
+    iy=np.clip(np.searchsorted(y_bins,df_s[y_col].to_numpy(),side='right')-1,0,2)
+    for cx,cy in zip(ix,iy): counts[cy,cx]+=1
     return counts
 
 def draw_corridor_heatmap(df, title='Zone Heatmap — Completed (Destination)'):
-    df_s   = df[df['is_won']].copy()
-    x_bins, _ = _zone_bins()
-    corridors = {
-        'left':   (LANE_LEFT_MIN,  FIELD_Y),
-        'center': (LANE_RIGHT_MAX, LANE_LEFT_MIN),
-        'right':  (0.0,            LANE_RIGHT_MAX),
-    }
-    counts = {}
+    df_s=df[df['is_won']].copy()
+    x_bins,_=_zone_bins()
+    corridors={'left':(LANE_LEFT_MIN,FIELD_Y),'center':(LANE_RIGHT_MAX,LANE_LEFT_MIN),'right':(0.0,LANE_RIGHT_MAX)}
+    counts={}
     for cname,(y0,y1) in corridors.items():
-        arr = np.zeros(6, dtype=int)
+        arr=np.zeros(6,dtype=int)
         for i in range(6):
-            x0_,x1_ = x_bins[i],x_bins[i+1]
-            arr[i] = int(((df_s['x_end']>=x0_)&(df_s['x_end']<x1_)
-                          &(df_s['y_end']>=y0)&(df_s['y_end']<y1)).sum())
-        counts[cname] = arr
+            x0_,x1_=x_bins[i],x_bins[i+1]
+            arr[i]=int(((df_s['x_end']>=x0_)&(df_s['x_end']<x1_)
+                        &(df_s['y_end']>=y0)&(df_s['y_end']<y1)).sum())
+        counts[cname]=arr
+    all_vals=np.concatenate([counts[c] for c in counts])
+    vmax=max(1,int(all_vals.max()))
+    cmap=LinearSegmentedColormap.from_list("wr",["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
+    norm=Normalize(vmin=0,vmax=vmax); thr=max(1,vmax*0.35)
 
-    all_vals = np.concatenate([counts[c] for c in counts])
-    vmax     = max(1, int(all_vals.max()))
-    cmap     = LinearSegmentedColormap.from_list("wr",["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
-    norm     = Normalize(vmin=0, vmax=vmax)
-    thr      = max(1, vmax*0.35)
-
-    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e',
-                  line_color='#ffffff', line_alpha=0.95)
-    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
-    fig.set_facecolor('#1a1a2e'); fig.set_dpi(FIG_DPI)
-
+    fig, ax, pitch = _base_pitch()
     for cname,(y0,y1) in corridors.items():
         for i in range(6):
-            x0_,x1_ = x_bins[i],x_bins[i+1]
-            value    = counts[cname][i]
+            x0_,x1_=x_bins[i],x_bins[i+1]; value=counts[cname][i]
             ax.add_patch(Rectangle((x0_,y0),x1_-x0_,y1-y0,
-                                   facecolor=cmap(norm(value)),
-                                   edgecolor=(1,1,1,0.12),lw=0.6,alpha=0.95,zorder=2))
+                                   facecolor=cmap(norm(value)),edgecolor=(1,1,1,0.12),lw=0.6,alpha=0.95,zorder=2))
             ax.text((x0_+x1_)/2,(y0+y1)/2,str(value),ha='center',va='center',
                     color='#000000' if value<=thr else '#ffffff',
                     fontsize=10,fontweight='700' if value>=vmax*0.5 else '600',zorder=4)
-
     ax.axhline(y=LANE_LEFT_MIN, color='#ffffff',lw=0.5,alpha=0.15,linestyle='--',zorder=3)
     ax.axhline(y=LANE_RIGHT_MAX,color='#ffffff',lw=0.5,alpha=0.15,linestyle='--',zorder=3)
-    ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
-    fig.tight_layout(); fig.canvas.draw()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor(), bbox_inches='tight')
-    buf.seek(0)
-    return Image.open(buf), ax, fig
+    ax.set_title(title,fontsize=11,color='#ffffff',pad=7)
+    _attack_arrow(fig, ax)
+    return _save_fig(fig), ax, fig
 
-
-# ── High-resolution density heatmap (ALL passes) ─────────────────────────────
+# =============================================================================
+# Density heatmap — ALL passes, fine grid, prominent field lines
+# =============================================================================
 def draw_density_heatmap(df, title='Pass Density — All Passes'):
-    NX_D, NY_D = 30, 20  # more cells = more quadrants
+    NX_D, NY_D = 30, 20
     x_edges = np.linspace(0, FIELD_X, NX_D+1)
     y_edges = np.linspace(0, FIELD_Y, NY_D+1)
 
-    # Both origins and destinations of all passes
     all_x = np.concatenate([df['x_start'].values, df['x_end'].values])
     all_y = np.concatenate([df['y_start'].values, df['y_end'].values])
-
     counts, _, _ = np.histogram2d(all_x, all_y, bins=[x_edges, y_edges])
-    counts = counts.T  # shape (NY_D, NX_D)
+    counts = gaussian_filter(counts.T.astype(float), sigma=0.85)
 
-    # Smooth slightly for visual appeal
-    from scipy.ndimage import gaussian_filter
-    counts_smooth = gaussian_filter(counts.astype(float), sigma=0.9)
-
+    # Dark background pitch with brighter, more visible lines
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#04000f',
-                  line_color='#333355', line_alpha=0.55)
+                  line_color='#8899cc', line_alpha=0.85,
+                  linewidth=1.4)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor('#04000f'); fig.set_dpi(FIG_DPI)
 
-    vmax = max(1.0, counts_smooth.max())
+    vmax = max(1.0, counts.max())
     norm = Normalize(vmin=0, vmax=vmax)
 
+    # Cell margin: shrink each rect slightly inward so white gaps appear between cells
+    margin = 0.28   # field units (~28 cm gap)
     for iy in range(NY_D):
         for ix in range(NX_D):
-            val = counts_smooth[iy, ix]
-            if val < 0.05:
-                continue
-            x0_, x1_ = x_edges[ix], x_edges[ix+1]
-            y0_, y1_ = y_edges[iy], y_edges[iy+1]
-            ax.add_patch(Rectangle((x0_,y0_), x1_-x0_, y1_-y0_,
-                                   facecolor=CMAP_DENSITY(norm(val)),
-                                   edgecolor='none', alpha=0.90, zorder=2))
+            val = counts[iy, ix]
+            if val < 0.04: continue
+            x0_ = x_edges[ix]   + margin
+            x1_ = x_edges[ix+1] - margin
+            y0_ = y_edges[iy]   + margin
+            y1_ = y_edges[iy+1] - margin
+            ax.add_patch(Rectangle(
+                (x0_, y0_), x1_-x0_, y1_-y0_,
+                facecolor=CMAP_DENSITY(norm(val)),
+                edgecolor=(1,1,1,0.06),   # barely-visible white edge on top
+                lw=0.3,
+                alpha=0.88, zorder=2
+            ))
 
-    # Attacking penalty-box dashed outline (~StatsBomb coordinates)
-    pen_x, pen_y, pen_w, pen_h = 102.0, 18.0, 18.0, 44.0
-    ax.add_patch(Rectangle((pen_x,pen_y), pen_w, pen_h,
-                            facecolor='none', edgecolor='white',
-                            lw=1.3, linestyle='--', alpha=0.55, zorder=5))
+    # Attacking penalty-box dashed outline
+    ax.add_patch(Rectangle((102.0,18.0),18.0,44.0,
+                            facecolor='none',edgecolor='white',
+                            lw=1.3,linestyle='--',alpha=0.50,zorder=5))
 
     ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
+    sm=plt.cm.ScalarMappable(cmap=CMAP_DENSITY,norm=norm)
+    cbar=fig.colorbar(sm,ax=ax,fraction=0.016,pad=0.01,shrink=0.70)
+    cbar.set_label('Density',color='#a0b4c8',fontsize=8,labelpad=2)
+    cbar.ax.yaxis.set_tick_params(color='#a0b4c8',labelsize=6)
+    plt.setp(plt.getp(cbar.ax.axes,'yticklabels'),color='#a0b4c8')
+    _attack_arrow(fig, ax)
+    return _save_fig(fig), ax, fig
 
-    # Colorbar
-    sm = plt.cm.ScalarMappable(cmap=CMAP_DENSITY, norm=norm)
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.016, pad=0.01, shrink=0.70)
-    cbar.set_label('Density', color='#a0b4c8', fontsize=8, labelpad=2)
-    cbar.ax.yaxis.set_tick_params(color='#a0b4c8', labelsize=6)
-    plt.setp(plt.getp(cbar.ax.axes,'yticklabels'), color='#a0b4c8')
-
-    fig.tight_layout(); fig.canvas.draw()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor(), bbox_inches='tight')
-    buf.seek(0)
-    return Image.open(buf), ax, fig
-
-
-# ── Zone mini-map connections ─────────────────────────────────────────────────
+# =============================================================================
+# Zone mini-map connections
+# =============================================================================
 def _top_zone_transitions(df_s, top_k=14):
-    x_bins, y_bins = _zone_bins()
-    if df_s.empty: return [], x_bins, y_bins
-    sx = np.clip(np.searchsorted(x_bins,df_s['x_start'].to_numpy(),side='right')-1,0,5)
-    sy = np.clip(np.searchsorted(y_bins,df_s['y_start'].to_numpy(),side='right')-1,0,2)
-    ex = np.clip(np.searchsorted(x_bins,df_s['x_end'].to_numpy(),  side='right')-1,0,5)
-    ey = np.clip(np.searchsorted(y_bins,df_s['y_end'].to_numpy(),  side='right')-1,0,2)
-    trans = defaultdict(int)
+    x_bins,y_bins=_zone_bins()
+    if df_s.empty: return [],x_bins,y_bins
+    sx=np.clip(np.searchsorted(x_bins,df_s['x_start'].to_numpy(),side='right')-1,0,5)
+    sy=np.clip(np.searchsorted(y_bins,df_s['y_start'].to_numpy(),side='right')-1,0,2)
+    ex=np.clip(np.searchsorted(x_bins,df_s['x_end'].to_numpy(),  side='right')-1,0,5)
+    ey=np.clip(np.searchsorted(y_bins,df_s['y_end'].to_numpy(),  side='right')-1,0,2)
+    trans=defaultdict(int)
     for a,b,c,d in zip(sx,sy,ex,ey):
         if int(a)==int(c) and int(b)==int(d): continue
-        trans[(int(a),int(b),int(c),int(d))] += 1
-    return sorted(trans.items(),key=lambda kv:kv[1],reverse=True)[:top_k], x_bins, y_bins
+        trans[(int(a),int(b),int(c),int(d))]+=1
+    return sorted(trans.items(),key=lambda kv:kv[1],reverse=True)[:top_k],x_bins,y_bins
 
 def draw_top_connection_minimaps(df, top_k=3, title='Top Zone Connections'):
-    df_s = df[df['is_won']].copy()
-    links, x_bins, y_bins = _top_zone_transitions(df_s, top_k=top_k)
-    fig, axes = plt.subplots(1,top_k,figsize=(FIG_W*1.6,FIG_H*0.80),dpi=FIG_DPI)
+    df_s=df[df['is_won']].copy()
+    links,x_bins,y_bins=_top_zone_transitions(df_s,top_k=top_k)
+    # Keep same aspect ratio for mini maps too
+    fig,axes=plt.subplots(1,top_k,figsize=(FIG_W*1.6,FIG_H*0.80),dpi=FIG_DPI)
     if top_k==1: axes=[axes]
     fig.set_facecolor('#1a1a2e')
-    pitch = Pitch(pitch_type='statsbomb',pitch_color='#1a1a2e',line_color='#ffffff',line_alpha=0.90)
+    pitch=Pitch(pitch_type='statsbomb',pitch_color='#1a1a2e',line_color='#ffffff',line_alpha=0.90)
     x_cent=(x_bins[:-1]+x_bins[1:])/2.0; y_cent=(y_bins[:-1]+y_bins[1:])/2.0
-    max_cnt = max([v for _,v in links],default=1)
+    max_cnt=max([v for _,v in links],default=1)
     for idx,ax in enumerate(axes):
         pitch.draw(ax=ax)
         if idx>=len(links): ax.set_title('—',fontsize=9,color='#dbeafe',pad=4); continue
-        (ix0,iy0,ix1,iy1),cnt = links[idx]
+        (ix0,iy0,ix1,iy1),cnt=links[idx]
         x0,y0=float(x_cent[ix0]),float(y_cent[iy0]); x1,y1=float(x_cent[ix1]),float(y_cent[iy1])
         rel=cnt/max_cnt; color=plt.cm.Blues(0.40+0.55*rel); lw=1.2+4.2*rel; alpha=0.30+0.60*rel
         ax.add_patch(Rectangle((x_bins[ix0],y_bins[iy0]),x_bins[ix0+1]-x_bins[ix0],y_bins[iy0+1]-y_bins[iy0],
@@ -587,50 +555,44 @@ def draw_top_connection_minimaps(df, top_k=3, title='Top Zone Connections'):
     fig.tight_layout(rect=[0,0,1,0.95]); fig.canvas.draw()
     buf=BytesIO()
     fig.savefig(buf,format='png',dpi=FIG_DPI,facecolor=fig.get_facecolor(),bbox_inches='tight')
-    buf.seek(0)
-    return Image.open(buf), axes, fig
+    buf.seek(0); return Image.open(buf),axes,fig
 
-
-# ── Zone heatmaps dual panel (analyses tab) ───────────────────────────────────
+# =============================================================================
+# Dual zone heatmap panel (analyses tab)
+# =============================================================================
 def draw_zone_heatmaps_panel(df, title='Zone Heatmaps — Origin & Destination'):
-    df_s = df[df['is_won']].copy()
-    x_bins, y_bins = _zone_bins()
-    oc = _zone_counts(df_s,'x_start','y_start')
-    dc = _zone_counts(df_s,'x_end','y_end')
-    cmap_h = LinearSegmentedColormap.from_list('wr',['#ffffff','#ffecec','#ffbfbf','#ff8080','#ff3b3b','#ff0000'])
-    norm_o = Normalize(vmin=0,vmax=max(1,int(oc.max())))
-    norm_d = Normalize(vmin=0,vmax=max(1,int(dc.max())))
-    fig,axes = plt.subplots(1,2,figsize=(FIG_W*2.9,FIG_H*1.55),dpi=FIG_DPI)
+    df_s=df[df['is_won']].copy(); x_bins,y_bins=_zone_bins()
+    oc=_zone_counts(df_s,'x_start','y_start'); dc=_zone_counts(df_s,'x_end','y_end')
+    cmap_h=LinearSegmentedColormap.from_list('wr',['#ffffff','#ffecec','#ffbfbf','#ff8080','#ff3b3b','#ff0000'])
+    norm_o=Normalize(vmin=0,vmax=max(1,int(oc.max()))); norm_d=Normalize(vmin=0,vmax=max(1,int(dc.max())))
+    fig,axes=plt.subplots(1,2,figsize=(FIG_W*2.1,FIG_H*1.0),dpi=FIG_DPI)
     fig.set_facecolor('#1a1a2e')
-    pitch = Pitch(pitch_type='statsbomb',pitch_color='#1a1a2e',line_color='#ffffff',line_alpha=0.95)
+    pitch=Pitch(pitch_type='statsbomb',pitch_color='#1a1a2e',line_color='#ffffff',line_alpha=0.95)
     for ax,counts,norm_h,sub in zip(axes,[oc,dc],[norm_o,norm_d],['Origin','Destination']):
-        pitch.draw(ax=ax)
-        vmax_l = max(1,int(counts.max()))
+        pitch.draw(ax=ax); vmax_l=max(1,int(counts.max()))
         for r in range(3):
             for c in range(6):
-                x0,x1 = x_bins[c],x_bins[c+1]; y0,y1 = y_bins[r],y_bins[r+1]
-                val = int(counts[r,c])
+                x0,x1=x_bins[c],x_bins[c+1]; y0,y1=y_bins[r],y_bins[r+1]
+                val=int(counts[r,c])
                 if val==0: continue
                 ax.add_patch(Rectangle((x0,y0),x1-x0,y1-y0,
                                        facecolor=cmap_h(norm_h(val)),edgecolor=(1,1,1,0.12),lw=0.6,alpha=0.92,zorder=2))
                 ax.text((x0+x1)/2,(y0+y1)/2,str(val),ha='center',va='center',zorder=4,fontsize=11,
                         color='#ffffff' if val>=max(2,int(vmax_l*0.35)) else '#1d1d1d',fontweight='600')
-        ax.set_title(sub,fontsize=14,color='#ffffff',pad=6,fontweight='700')
+        ax.set_title(sub,fontsize=13,color='#ffffff',pad=6,fontweight='700')
         ax.axhline(y=LANE_LEFT_MIN, color='#ffffff',lw=0.5,alpha=0.12,linestyle='--',zorder=3)
         ax.axhline(y=LANE_RIGHT_MAX,color='#ffffff',lw=0.5,alpha=0.12,linestyle='--',zorder=3)
-    fig.suptitle(title,fontsize=16,color='#ffffff',y=0.995,fontweight='700')
+    fig.suptitle(title,fontsize=15,color='#ffffff',y=0.995,fontweight='700')
     fig.tight_layout(rect=[0,0,1,0.965]); fig.canvas.draw()
     buf=BytesIO()
     fig.savefig(buf,format='png',dpi=FIG_DPI,facecolor=fig.get_facecolor(),bbox_inches='tight')
-    buf.seek(0)
-    return Image.open(buf), axes, fig
+    buf.seek(0); return Image.open(buf),axes,fig
 
 # =============================================================================
 # Session state
 # =============================================================================
-for key, default in [('selected_action',None),('last_map_click',None),('last_match',None)]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+for key,default in [('selected_action',None),('last_map_click',None),('last_match',None)]:
+    if key not in st.session_state: st.session_state[key]=default
 
 # =============================================================================
 # TABS
@@ -643,102 +605,81 @@ tab_map, tab_analysis = st.tabs(['📍 Map', '📊 Analyses'])
 with tab_map:
     col_f, col_map, col_stats = st.columns([0.72, 2.05, 1.08], gap='medium')
 
-    # ── Filters ──────────────────────────────────────────────────────────────
     with col_f:
         st.markdown('<div class="filter-panel">', unsafe_allow_html=True)
         st.markdown('### 🏟 Match')
-        selected_match = st.selectbox('Choose match', list(full_data.keys()), index=0, label_visibility='collapsed')
+        selected_match=st.selectbox('Choose match',list(full_data.keys()),index=0,label_visibility='collapsed')
         st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
         st.markdown('### ℹ️ Info')
-        st.caption('Top 15 passes by ΔxT shown as comets.\nSofter colour = lower ΔxT.\nClick a head dot to inspect.')
+        st.caption('Top 15 passes by ΔxT.\nSofter / thinner arrow = lower ΔxT.\nClick an arrow origin dot to inspect.')
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Reset on match change
-    if st.session_state['last_match'] != selected_match:
-        st.session_state['selected_action'] = None
-        st.session_state['last_map_click']   = None
-        st.session_state['last_match']        = selected_match
+    if st.session_state['last_match']!=selected_match:
+        st.session_state['selected_action']=None
+        st.session_state['last_map_click']=None
+        st.session_state['last_match']=selected_match
 
-    df_base = recompute_bonus(full_data[selected_match].copy())
+    df_base=recompute_bonus(full_data[selected_match].copy())
 
-    # Pre-read table selection to keep map highlight in sync
-    _tbl_state = st.session_state.get('top15_tbl', None)
-    _tbl_rows  = (
-        _tbl_state.get('selection',{}).get('rows',[])
-        if isinstance(_tbl_state,dict) else
-        (getattr(getattr(_tbl_state,'selection',None),'rows',None) or [])
+    # Pre-read table selection
+    _tbl_state=st.session_state.get('top15_tbl',None)
+    _tbl_rows=(
+        _tbl_state.get('selection',{}).get('rows',[]) if isinstance(_tbl_state,dict)
+        else (getattr(getattr(_tbl_state,'selection',None),'rows',None) or [])
     )
 
-    # ── Map column ────────────────────────────────────────────────────────────
     with col_map:
-        cur_sel = st.session_state.get('selected_action')
-        sel_num = int(cur_sel['number']) if cur_sel is not None else None
+        cur_sel=st.session_state.get('selected_action')
+        sel_num=int(cur_sel['number']) if cur_sel is not None else None
 
-        st.markdown('<h4 style="color:#ffffff;margin:2px 0 4px 0;">Top 15 ΔxT Comet Map</h4>',
-                    unsafe_allow_html=True)
-        img_obj, ax, fig, top15_df = draw_top15_map(
-            df_base, title=f'Top 15 ΔxT — {selected_match}', selected_num=sel_num)
+        st.markdown('<h4 style="color:#ffffff;margin:2px 0 4px 0;">Top 15 ΔxT</h4>',unsafe_allow_html=True)
+        img_obj,ax,fig,top15_df=draw_top15_map(df_base,title=f'Top 15 ΔxT — {selected_match}',selected_num=sel_num)
 
-        # Apply pending table selection before showing map
         if _tbl_rows and not top15_df.empty:
-            _ri = int(_tbl_rows[0])
-            if 0 <= _ri < len(top15_df):
-                _cand = top15_df.iloc[_ri]
-                if cur_sel is None or int(cur_sel['number']) != int(_cand['number']):
-                    st.session_state['selected_action'] = _cand
-                    st.session_state['last_map_click']   = None
+            _ri=int(_tbl_rows[0])
+            if 0<=_ri<len(top15_df):
+                _cand=top15_df.iloc[_ri]
+                if cur_sel is None or int(cur_sel['number'])!=int(_cand['number']):
+                    st.session_state['selected_action']=_cand
+                    st.session_state['last_map_click']=None
 
-        MAP_W = 880
-        click = streamlit_image_coordinates(img_obj, width=MAP_W, key='map_img')
-
-        if click is not None and click != st.session_state['last_map_click']:
-            st.session_state['last_map_click'] = click
+        MAP_W=880
+        click=streamlit_image_coordinates(img_obj,width=MAP_W,key='map_img')
+        if click is not None and click!=st.session_state['last_map_click']:
+            st.session_state['last_map_click']=click
             if not top15_df.empty:
-                rw,rh = img_obj.size
-                px = click['x']*(rw/click['width'])
-                py = click['y']*(rh/click['height'])
-                fx,fy = ax.transData.inverted().transform((px, rh-py))
-                tmp = top15_df.copy()
-                tmp['_d'] = np.sqrt((tmp.x_start-fx)**2+(tmp.y_start-fy)**2)
-                cands = tmp[tmp['_d']<6.0].sort_values('_d')
-                if not cands.empty:
-                    st.session_state['selected_action'] = cands.iloc[0]
+                rw,rh=img_obj.size
+                px=click['x']*(rw/click['width']); py=click['y']*(rh/click['height'])
+                fx,fy=ax.transData.inverted().transform((px,rh-py))
+                tmp=top15_df.copy()
+                tmp['_d']=np.sqrt((tmp.x_start-fx)**2+(tmp.y_start-fy)**2)
+                cands=tmp[tmp['_d']<6.0].sort_values('_d')
+                if not cands.empty: st.session_state['selected_action']=cands.iloc[0]
         plt.close(fig)
 
-        # Zone corridor heatmap
-        st.markdown('<h4 style="color:#ffffff;margin:10px 0 3px 0;">Zone Heatmap — Completed</h4>',
-                    unsafe_allow_html=True)
-        zh_img,_,zh_fig = draw_corridor_heatmap(df_base)
-        st.image(zh_img, use_container_width=True)
-        plt.close(zh_fig)
+        st.markdown('<h4 style="color:#ffffff;margin:10px 0 3px 0;">Zone Heatmap — Completed</h4>',unsafe_allow_html=True)
+        zh_img,_,zh_fig=draw_corridor_heatmap(df_base)
+        st.image(zh_img,use_container_width=True); plt.close(zh_fig)
 
-        # Density heatmap
-        st.markdown('<h4 style="color:#ffffff;margin:10px 0 3px 0;">Pass Density — All Passes</h4>',
-                    unsafe_allow_html=True)
-        dh_img,_,dh_fig = draw_density_heatmap(df_base)
-        st.image(dh_img, use_container_width=True)
-        plt.close(dh_fig)
+        st.markdown('<h4 style="color:#ffffff;margin:10px 0 3px 0;">Pass Density — All Passes</h4>',unsafe_allow_html=True)
+        dh_img,_,dh_fig=draw_density_heatmap(df_base)
+        st.image(dh_img,use_container_width=True); plt.close(dh_fig)
 
-    # ── Stats + Table + Event panel ───────────────────────────────────────────
     with col_stats:
-        s = compute_stats(df_base)
+        s=compute_stats(df_base)
 
-        # ── Stat boxes ────────────────────────────────────────────────────────
         stat_box('Accuracy',    f"{s['accuracy']:.1f}%",
                  f"{s['successful']} successful / {s['total']} total", accent='green')
         stat_box('Σ ΔxT',       f"{s['sum_dxt']:.3f}",
                  f"Avg positive: {s['pos_mean']:.3f}", accent='amber')
         stat_box('% Positive ΔxT', f"{s['pos_pct']:.1f}%",
-                 f"Count: {s['successful']}", accent='blue')
-
-        c1,c2 = st.columns(2)
+                 f"Positive count: {s['successful']}", accent='blue')
+        c1,c2=st.columns(2)
         with c1: stat_box('Σ Top 15',   f"{s['top15_sum']:.2f}",  accent='purple')
         with c2: stat_box('Avg Top 15', f"{s['top15_mean']:.2f}", accent='purple')
-
-        c3,c4 = st.columns(2)
+        c3,c4=st.columns(2)
         with c3: stat_box('Σ End xT',    f"{s['xt_end_sum']:.2f}",  accent='cyan')
         with c4: stat_box('Σ xT Failed', f"{s['fail_xt_sum']:.2f}", accent='red')
-
         st.markdown(
             f'<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:8px;">'
             f'<div class="stat-box" style="text-align:center;">'
@@ -747,66 +688,54 @@ with tab_map:
             f'<div class="sb-label">Backward</div><div class="sb-value" style="font-size:17px;">{s["bwd"]}</div></div>'
             f'<div class="stat-box" style="text-align:center;">'
             f'<div class="sb-label">Lateral</div><div class="sb-value" style="font-size:17px;">{s["lat"]}</div></div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+            f'</div>', unsafe_allow_html=True)
 
-        # ── Top 15 table ──────────────────────────────────────────────────────
-        st.markdown('<h4 style="color:#ffffff;margin:6px 0 3px 0;">Top 15 ΔxT</h4>',
-                    unsafe_allow_html=True)
+        st.markdown('<h4 style="color:#ffffff;margin:6px 0 3px 0;">Top 15 ΔxT</h4>',unsafe_allow_html=True)
         if top15_df.empty:
             st.caption('No successful actions with positive ΔxT.')
         else:
-            show_df = pd.DataFrame({
-                'Rank':      top15_df['rank'].astype(int),
-                'Action #':  top15_df['number'].astype(int),
-                'ΔxT':       top15_df['delta_xt_adj'].map(lambda x: f'{x:.4f}'),
-                'xT End':    top15_df['xt_end'].map(lambda x: f'{x:.4f}'),
+            show_df=pd.DataFrame({
+                'Rank':     top15_df['rank'].astype(int),
+                'Action #': top15_df['number'].astype(int),
+                'ΔxT':      top15_df['delta_xt_adj'].map(lambda x:f'{x:.4f}'),
+                'xT End':   top15_df['xt_end'].map(lambda x:f'{x:.4f}'),
             })
-            ev = st.dataframe(show_df, use_container_width=True, height=350,
-                              hide_index=True, selection_mode='single-row',
-                              on_select='rerun', key='top15_tbl')
+            ev=st.dataframe(show_df,use_container_width=True,height=340,
+                            hide_index=True,selection_mode='single-row',
+                            on_select='rerun',key='top15_tbl')
             if hasattr(ev,'selection') and ev.selection.rows:
-                ri = int(ev.selection.rows[0])
-                if 0 <= ri < len(top15_df):
-                    _cand2 = top15_df.iloc[ri]
-                    _cur2  = st.session_state.get('selected_action')
-                    if _cur2 is None or int(_cur2['number']) != int(_cand2['number']):
-                        st.session_state['selected_action'] = _cand2
-                        st.session_state['last_map_click']   = None
+                ri=int(ev.selection.rows[0])
+                if 0<=ri<len(top15_df):
+                    _c2=top15_df.iloc[ri]; _cur2=st.session_state.get('selected_action')
+                    if _cur2 is None or int(_cur2['number'])!=int(_c2['number']):
+                        st.session_state['selected_action']=_c2
+                        st.session_state['last_map_click']=None
 
-        # ── Event panel ───────────────────────────────────────────────────────
-        st.markdown('<h4 style="color:#ffffff;margin:8px 0 3px 0;">Event Panel</h4>',
-                    unsafe_allow_html=True)
-        sel = st.session_state.get('selected_action')
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 3px 0;">Event Panel</h4>',unsafe_allow_html=True)
+        sel=st.session_state.get('selected_action')
         if sel is None:
             st.info('Click an origin dot on the map or select a row in the table.')
         else:
-            rank_v = int(sel['rank']) if 'rank' in sel.index and not pd.isna(sel['rank']) else None
-            col_h  = CMAP_TOP15(NORM_TOP15(np.clip(float(sel['delta_xt_adj']),0.1,0.5)))
-            hex_c  = matplotlib.colors.to_hex(col_h)
+            rank_v=int(sel['rank']) if 'rank' in sel.index and not pd.isna(sel['rank']) else None
+            hex_c=matplotlib.colors.to_hex(CMAP_TOP15(NORM_TOP15(np.clip(float(sel['delta_xt_adj']),0.1,0.5))))
             st.markdown(
                 f'<div style="display:flex;align-items:center;gap:9px;margin-bottom:7px;">'
                 f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
                 f'background:{hex_c};border:2px solid #fff;"></span>'
-                f'<strong style="color:#fff;font-size:13px;">Action #{int(sel["number"])} '
-                f'{"| Rank #"+str(rank_v) if rank_v else ""}</strong></div>',
-                unsafe_allow_html=True
-            )
-            ca,cb = st.columns(2)
+                f'<strong style="color:#fff;font-size:13px;">Action #{int(sel["number"])}'
+                f'{" | Rank #"+str(rank_v) if rank_v else ""}</strong></div>',
+                unsafe_allow_html=True)
+            ca,cb=st.columns(2)
             with ca:
                 st.write(f'**Start:** ({sel["x_start"]:.2f}, {sel["y_start"]:.2f})')
                 st.write(f'**End:** ({sel["x_end"]:.2f}, {sel["y_end"]:.2f})')
                 st.write(f'**Dir:** {str(sel["direction"]).capitalize()}')
             with cb:
-                st.metric('Distance', f'{float(sel["action_distance"]):.1f} m')
-                st.metric('ΔxT', f'{float(sel["delta_xt_adj"]):.4f}')
-
-            if pd.notna(sel['video']) and str(sel['video']).strip() != '':
-                try:
-                    st.video(sel['video'])
-                except Exception:
-                    st.error('Video not found.')
+                st.metric('Distance',f'{float(sel["action_distance"]):.1f} m')
+                st.metric('ΔxT',f'{float(sel["delta_xt_adj"]):.4f}')
+            if pd.notna(sel['video']) and str(sel['video']).strip()!='':
+                try: st.video(sel['video'])
+                except: st.error('Video not found.')
             else:
                 st.caption('No video attached.')
 
@@ -814,57 +743,47 @@ with tab_map:
 # TAB ANALYSES
 # =============================================================================
 with tab_analysis:
-    sel_an = st.selectbox('Match', list(full_data.keys()), index=0, key='an_match')
-    df_an  = recompute_bonus(full_data[sel_an].copy())
-    s_an   = compute_stats(df_an)
+    sel_an=st.selectbox('Match',list(full_data.keys()),index=0,key='an_match')
+    df_an=recompute_bonus(full_data[sel_an].copy()); s_an=compute_stats(df_an)
 
-    st.markdown('<div style="font-size:17px;font-weight:700;color:#e0f2fe;margin-bottom:10px;">Performance Overview</div>',
-                unsafe_allow_html=True)
-
-    k1,k2,k3 = st.columns(3)
-    def _kpi(col, label, value, sub, border):
+    st.markdown('<div style="font-size:17px;font-weight:700;color:#e0f2fe;margin-bottom:10px;">Performance Overview</div>',unsafe_allow_html=True)
+    k1,k2,k3=st.columns(3)
+    def _kpi(col,label,value,sub,border):
         col.markdown(
             f'<div style="background:rgba(255,255,255,.04);border-left:4px solid {border};'
             f'border-radius:11px;padding:14px 16px;">'
             f'<div style="font-size:10px;color:#94a3b8;letter-spacing:.7px;text-transform:uppercase;font-weight:600;">{label}</div>'
             f'<div style="font-size:28px;font-weight:700;color:#ffffff;line-height:1.15;">{value}</div>'
-            f'<div style="font-size:10px;color:#64748b;margin-top:4px;">{sub}</div>'
-            f'</div>', unsafe_allow_html=True)
+            f'<div style="font-size:10px;color:#64748b;margin-top:4px;">{sub}</div></div>',
+            unsafe_allow_html=True)
+    _kpi(k1,'Accuracy',       f"{s_an['accuracy']:.1f}%",   f"{s_an['successful']} / {s_an['total']} successful",'#10b981')
+    _kpi(k2,'Σ ΔxT',          f"{s_an['sum_dxt']:.3f}",     f"Avg positive ΔxT: {s_an['pos_mean']:.3f}",'#f59e0b')
+    _kpi(k3,'% Positive ΔxT', f"{s_an['pos_pct']:.1f}%",    f"Count w/ ΔxT > 0",'#3b82f6')
 
-    _kpi(k1,'Accuracy',      f"{s_an['accuracy']:.1f}%",
-         f"{s_an['successful']} / {s_an['total']} successful", '#10b981')
-    _kpi(k2,'Σ ΔxT',         f"{s_an['sum_dxt']:.3f}",
-         f"Avg positive ΔxT: {s_an['pos_mean']:.3f}", '#f59e0b')
-    _kpi(k3,'% Positive ΔxT',f"{s_an['pos_pct']:.1f}%",
-         f"Count w/ ΔxT > 0", '#3b82f6')
-
-    st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
-    p1,p2,p3,p4 = st.columns(4)
+    st.markdown('<div style="height:8px;"></div>',unsafe_allow_html=True)
+    p1,p2,p3,p4=st.columns(4)
     with p1: small_metric('Σ Top 15 ΔxT',  f"{s_an['top15_sum']:.3f}")
     with p2: small_metric('Avg Top 15 ΔxT', f"{s_an['top15_mean']:.3f}")
     with p3: small_metric('Σ End xT',        f"{s_an['xt_end_sum']:.3f}")
     with p4: small_metric('Σ xT Failed',     f"{s_an['fail_xt_sum']:.3f}")
 
-    st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
-    d1,d2,d3 = st.columns(3)
+    st.markdown('<div style="height:4px;"></div>',unsafe_allow_html=True)
+    d1,d2,d3=st.columns(3)
     with d1: small_metric('Forward',  f"{s_an['fwd']}", delta=f"{s_an['fwd']/max(s_an['total'],1)*100:.0f}% of total")
     with d2: small_metric('Backward', f"{s_an['bwd']}", delta=f"{s_an['bwd']/max(s_an['total'],1)*100:.0f}% of total")
     with d3: small_metric('Lateral',  f"{s_an['lat']}", delta=f"{s_an['lat']/max(s_an['total'],1)*100:.0f}% of total")
 
-    st.markdown('<h4 style="color:#ffffff;margin:16px 0 6px 0;">Zone Heatmaps</h4>', unsafe_allow_html=True)
-    hp_img,_,hp_fig = draw_zone_heatmaps_panel(df_an)
-    st.image(hp_img, use_container_width=True)
-    plt.close(hp_fig)
+    st.markdown('<h4 style="color:#ffffff;margin:16px 0 6px 0;">Zone Heatmaps</h4>',unsafe_allow_html=True)
+    hp_img,_,hp_fig=draw_zone_heatmaps_panel(df_an)
+    st.image(hp_img,use_container_width=True); plt.close(hp_fig)
 
-    st.markdown('<h4 style="color:#ffffff;margin:12px 0 6px 0;">Top Zone Connections</h4>', unsafe_allow_html=True)
-    mc_img,_,mc_fig = draw_top_connection_minimaps(df_an, top_k=3)
-    st.image(mc_img, use_container_width=True)
-    plt.close(mc_fig)
+    st.markdown('<h4 style="color:#ffffff;margin:12px 0 6px 0;">Top Zone Connections</h4>',unsafe_allow_html=True)
+    mc_img,_,mc_fig=draw_top_connection_minimaps(df_an,top_k=3)
+    st.image(mc_img,use_container_width=True); plt.close(mc_fig)
 
-    st.markdown('<h4 style="color:#ffffff;margin:12px 0 6px 0;">Pass Density — All Passes</h4>', unsafe_allow_html=True)
-    dha_img,_,dha_fig = draw_density_heatmap(df_an)
-    st.image(dha_img, use_container_width=True)
-    plt.close(dha_fig)
+    st.markdown('<h4 style="color:#ffffff;margin:12px 0 6px 0;">Pass Density — All Passes</h4>',unsafe_allow_html=True)
+    dha_img,_,dha_fig=draw_density_heatmap(df_an)
+    st.image(dha_img,use_container_width=True); plt.close(dha_fig)
 
-    st.caption('Comet scale: cream-yellow (low ΔxT) → orange → dark red (high ΔxT). '
-               'Density heatmap uses all passes (origin + destination).')
+    st.caption('Arrow width & opacity scale with ΔxT (cream-yellow = low, dark red = high). '
+               'Density map uses all pass origins + destinations.')
