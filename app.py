@@ -58,7 +58,7 @@ NX, NY = 16, 12
 FIG_W, FIG_H = 7.9, 5.3
 FIG_DPI = 110
 
-# Mapa (pedido)
+# Mapa (pedido anterior)
 COLOR_FAIL_WEAK = "#E07070"      # vermelho fraco (errados)
 COLOR_POS_XT_WEAK = "#2F80ED"    # azul fraco (ΔxT > 0)
 COLOR_NONPOS_WEAK = "#A0A0A0"    # cinza fraco (ΔxT <= 0)
@@ -66,17 +66,12 @@ ALPHA_FAIL = 0.45
 ALPHA_POS = 0.30
 ALPHA_NONPOS = 0.22
 
-# xT + distância
-D_REF = 10.0
-D_SCALE = 20.0
-BONUS_CAP = 0.60
-
-# Bônus por pressão (pedido)
+# Bonificação por pressão (conservadora)
 PRESSURE_BONUS = {
     "0-0": 0.00,  # sem bonificação
-    "1-0": 0.12,  # intermediário
-    "0-1": 0.12,  # intermediário
-    "1-1": 0.25,  # maior
+    "1-0": 0.06,  # conservadora
+    "0-1": 0.06,  # conservadora
+    "1-1": 0.12,  # maior, mas conservadora
 }
 PRESSURE_LABEL = {
     "0-0": "Sem pressão",
@@ -191,10 +186,6 @@ def xt_value(x, y):
     iy = int(np.clip((y / FIELD_Y) * NY, 0, NY - 1))
     return float(XT_GRID[iy, ix])
 
-def distance_bonus(distance):
-    excess = np.maximum(0.0, np.asarray(distance, dtype=float) - D_REF)
-    return np.minimum(BONUS_CAP, np.log1p(excess / D_SCALE))
-
 # =============================================================================
 # Data (fornecido)
 # =============================================================================
@@ -230,15 +221,20 @@ df["type"] = np.where(df["is_won"], "PASS WON", "PASS LOST")
 df["outcome"] = np.where(df["is_won"], "completed", "incomplete")
 df["pressure_label"] = df["pressure_tag"].map(PRESSURE_LABEL)
 
-# xT pipeline
+# xT pipeline (SEM bônus de distância)
 df["xt_start"] = df.apply(lambda r: xt_value(r.x_start, r.y_start), axis=1)
 df["xt_end"] = df.apply(lambda r: xt_value(r.x_end, r.y_end), axis=1)
 df["delta_xt_raw"] = np.where(df["is_won"], df["xt_end"] - df["xt_start"], 0.0)
-df["pass_distance"] = np.sqrt((df.x_end - df.x_start)**2 + (df.y_end - df.y_start)**2)
-df["dist_bonus"] = distance_bonus(df["pass_distance"].values)
-df["delta_xt_adj"] = np.where(df["is_won"], df["delta_xt_raw"] * (1 + df["dist_bonus"]), 0.0)
 df["pressure_bonus"] = df["pressure_tag"].map(PRESSURE_BONUS).fillna(0.0)
-df["delta_xt_final"] = np.where(df["is_won"], df["delta_xt_adj"] * (1 + df["pressure_bonus"]), 0.0)
+
+# delta final apenas com pressão
+df["delta_xt_final"] = np.where(
+    df["is_won"],
+    df["delta_xt_raw"] * (1 + df["pressure_bonus"]),
+    0.0
+)
+
+df["pass_distance"] = np.sqrt((df.x_end - df.x_start)**2 + (df.y_end - df.y_start)**2)
 
 # =============================================================================
 # Helpers (draw + stats)
@@ -304,7 +300,7 @@ def draw_pass_map(df_plot: pd.DataFrame, title: str):
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
 
-    # sem legenda por pressão (apenas por classe visual)
+    # sem legenda por pressão
     legend = ax.legend(
         handles=[
             Line2D([0],[0], color=COLOR_NONPOS_WEAK, lw=2.5, label="Completed (ΔxT ≤ 0)", alpha=0.80),
@@ -439,24 +435,28 @@ with col_field:
         c4.metric("xT fim", f"{selected_pass.xt_end:.4f}")
 
         c5, c6 = st.columns(2)
-        c5.metric("ΔxT final", f"{selected_pass.delta_xt_final:.4f}")
-        c6.metric("Distância", f"{selected_pass.pass_distance:.1f} m")
+        c5.metric("ΔxT bruto", f"{selected_pass.delta_xt_raw:.4f}")
+        c6.metric("Bônus pressão", f"{selected_pass.pressure_bonus:.2f}")
+
+        c7, c8 = st.columns(2)
+        c7.metric("ΔxT final", f"{selected_pass.delta_xt_final:.4f}")
+        c8.metric("Distância", f"{selected_pass.pass_distance:.1f} m")
 
     with st.expander("📊 Full Pass Data Table", expanded=False):
         cols = [
             "number","seta","type","pressure_tag","pressure_label",
             "x_start","y_start","x_end","y_end",
-            "xt_start","xt_end","delta_xt_raw","dist_bonus",
-            "pressure_bonus","delta_xt_adj","delta_xt_final","pass_distance"
+            "xt_start","xt_end","delta_xt_raw",
+            "pressure_bonus","delta_xt_final","pass_distance"
         ]
         st.dataframe(
             df_base[cols].style.format({
                 "x_start":"{:.2f}","y_start":"{:.2f}",
                 "x_end":"{:.2f}","y_end":"{:.2f}",
                 "xt_start":"{:.4f}","xt_end":"{:.4f}",
-                "delta_xt_raw":"{:.4f}","dist_bonus":"{:.3f}",
+                "delta_xt_raw":"{:.4f}",
                 "pressure_bonus":"{:.2f}",
-                "delta_xt_adj":"{:.4f}","delta_xt_final":"{:.4f}",
+                "delta_xt_final":"{:.4f}",
                 "pass_distance":"{:.1f}"
             }),
             use_container_width=True,
@@ -493,7 +493,8 @@ with col_stats:
             st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
 
     st.caption(
-        "0-0 = sem pressão · 1-0 = pressão na origem · 0-1 = pressão no destino · 1-1 = pressão em ambos"
+        "Bônus conservador de pressão aplicado sobre ΔxT bruto: "
+        "0-0=0.00, 1-0=0.06, 0-1=0.06, 1-1=0.12"
     )
     st.caption(
         "Mapa: cinza fraco = ΔxT ≤ 0 · azul fraco = ΔxT > 0 · vermelho fraco = passe errado"
