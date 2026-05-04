@@ -1,0 +1,7 @@
+streamlit
+matplotlib
+mplsoccer
+pandas
+numpy
+pillow
+streamlit-image-coordinates
