@@ -70,7 +70,6 @@ def stat_box(label, value, sub=None, accent='blue', delta=None, delta_good_is_up
             color = "#94a3b8"
             arrow = "−"
         
-        # Formata delta mantendo o tipo (int ou float)
         delta_str = f"{abs(delta):.1f}" if isinstance(delta, float) else f"{abs(delta)}"
         html += f'<div style="font-size:13px; font-weight:700; color:{color};">{arrow} {delta_str}</div>'
 
@@ -96,9 +95,9 @@ D_REF, D_SCALE, BONUS_CAP = 10.0, 20.0, 0.60
 FIG_W, FIG_H = 9.2, 6.1
 FIG_DPI      = 130
 
-# Cores pastéis elegantes para as setas (Amarelo suave -> Laranja -> Vermelho rosado)
+# Gradiente: Amarelo fraco (0.1) -> Laranja (0.3) -> Vermelho forte (0.5)
 CMAP_TOP15 = LinearSegmentedColormap.from_list(
-    "top15", ["#fde047", "#f59e0b", "#f43f5e", "#e11d48", "#be123c"]
+    "top15", ["#fef08a", "#f97316", "#b91c1c"]
 )
 NORM_TOP15 = Normalize(vmin=0.1, vmax=0.5)
 
@@ -299,7 +298,7 @@ def compute_stats(df):
     pos_mean=float(df.loc[pos_mask,'delta_xt_adj'].mean()) if pos_count else 0.0
     pos_pct=(pos_count/total*100) if total else 0.0
     
-    high_xt_count = int((df['delta_xt_adj'] > 0.05).sum())
+    high_xt_count = int((df['delta_xt_adj'] > 0.1).sum())
     high_xt_pct = (high_xt_count / total * 100) if total else 0.0
     
     top15_df=df.loc[pos_mask].sort_values('delta_xt_adj',ascending=False).head(15)
@@ -321,7 +320,6 @@ def compute_stats(df):
         'fwd':int(df['is_forward'].sum()),'bwd':int(df['is_backward'].sum()),'lat':int(df['is_lateral'].sum()),
     }
 
-# Calcular médias globais para o delta no painel
 all_match_stats = [compute_stats(recompute_bonus(full_data[k])) for k in matches_data.keys()]
 avg_stats = {}
 if all_match_stats:
@@ -337,14 +335,15 @@ def _base_pitch(bg='#1a1a2e', line_alpha=0.95, line_zorder=1.2, solid_lines=Fals
                   line_color='#ffffff', line_alpha=line_alpha, line_zorder=line_zorder, linestyle=linestyle)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor(bg); fig.set_dpi(FIG_DPI)
-    fig.subplots_adjust(bottom=0.10) # Space for attack arrow
+    fig.subplots_adjust(bottom=0.10)
     return fig, ax, pitch
 
 def _attack_arrow(fig, ax, has_cbar=False):
     ap = ax.get_position()
     cx = (ap.x0 + ap.x1) / 2
+    cx -= 0.04 # Ajuste mais para a esquerda
     if has_cbar:
-        cx -= 0.02 # Desloca ligeiramente para compensar a barra de gradiente
+        cx -= 0.04 # Ajuste extra para a esquerda quando tem colorbar
     sm = ap.y0 - 0.04
     fig.patches.append(FancyArrowPatch(
         (cx-0.055,sm),(cx+0.055,sm),transform=fig.transFigure,
@@ -358,18 +357,32 @@ def _save_fig(fig):
     fig.savefig(buf,format='png',dpi=FIG_DPI,facecolor=fig.get_facecolor(),bbox_inches='tight')
     buf.seek(0); return Image.open(buf)
 
-def _draw_soft_arrow(pitch, ax, x0, y0, x1, y1, color, is_sel=False):
-    width = 2.2; hw = 4.5; hl = 4.5; alpha = 0.95
+def _draw_comet_arrow(ax, x0, y0, x1, y1, color, is_sel=False):
+    segs = 12
+    ts = np.linspace(0.0, 1.0, segs + 1)
+    base_alpha = 1.0 if is_sel else 0.85
+    base_lw = 4.0 if is_sel else 2.5
     if is_sel:
-        color = '#00f0ff'; alpha = 1.0; width = 3.5; hw = 5.5; hl = 5.5
+        color = '#00f0ff'
         
-    pitch.arrows(x0, y0, x1, y1,
-                 color=color, width=width, headwidth=hw, headlength=hl,
-                 ax=ax, zorder=4, alpha=alpha)
-    dot_s = 35 if is_sel else 25
-    pitch.scatter(x0, y0, s=dot_s, marker='o', color=color,
-                  edgecolors='white', linewidths=0.6,
-                  ax=ax, zorder=6, alpha=alpha)
+    for i in range(segs):
+        t0, t1 = ts[i], ts[i+1]
+        xa = x0 + (x1-x0)*t0; ya = y0 + (y1-y0)*t0
+        xb = x0 + (x1-x0)*t1; yb = y0 + (y1-y0)*t1
+        
+        # Opacidade crescendo
+        alpha = base_alpha * (0.15 + 0.85 * t1)
+        # Espessura ligeiramente decrescente ou constante
+        lw = base_lw * (0.8 + 0.2 * t1)
+        ax.plot([xa, xb], [ya, yb], color=color, linewidth=lw, alpha=alpha, zorder=4, solid_capstyle='round')
+        
+    # Origem: bolinha oca (sem preenchimento)
+    dot_s_start = 35 if is_sel else 20
+    ax.scatter(x0, y0, s=dot_s_start, marker='o', facecolors='none', edgecolors=color, linewidths=1.5, zorder=5, alpha=base_alpha)
+    
+    # Destino: bolinha preenchida
+    dot_s_end = 50 if is_sel else 32
+    ax.scatter(x1, y1, s=dot_s_end, marker='o', facecolors=color, edgecolors='white', linewidths=0.9, zorder=6, alpha=base_alpha)
 
 # =============================================================================
 # Top-15 map
@@ -392,7 +405,7 @@ def draw_top15_map(df, title, selected_num=None):
             val   = float(row['delta_xt_adj'])
             color = CMAP_TOP15(NORM_TOP15(np.clip(val, 0.1, 0.5)))
             is_sel = selected_num is not None and int(row['number'])==selected_num
-            _draw_soft_arrow(pitch, ax,
+            _draw_comet_arrow(ax,
                              float(row.x_start), float(row.y_start),
                              float(row.x_end),   float(row.y_end),
                              color, is_sel)
@@ -457,7 +470,6 @@ def draw_density_heatmap(df):
     counts, _, _ = np.histogram2d(all_x, all_y, bins=[x_edges, y_edges])
     counts = gaussian_filter(counts.T.astype(float), sigma=0.85)
 
-    # Linhas do campo sólidas e em primeiro plano (zorder elevado)
     fig, ax, pitch = _base_pitch(bg='#0f172a', line_zorder=5, solid_lines=True)
 
     vmax = max(1.0, counts.max())
@@ -509,9 +521,6 @@ with tab_map:
         st.markdown('<div class="filter-panel">', unsafe_allow_html=True)
         st.markdown('### 🏟 Match')
         selected_match=st.selectbox('Choose match',list(full_data.keys()),index=0,label_visibility='collapsed')
-        st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
-        st.markdown('### ℹ️ Info')
-        st.caption('Top 15 passes by ΔxT.\nClick an arrow origin dot to inspect.')
         st.markdown('</div>', unsafe_allow_html=True)
 
     if st.session_state['last_match']!=selected_match:
@@ -554,8 +563,6 @@ with tab_map:
             st.image(dh_img,use_container_width=True); plt.close(dh_fig)
 
     with col_stats:
-        
-        # Exibimos delta de variação com a média apenas se não for "All Matches"
         is_single_match = (selected_match != 'All Matches')
         
         d_acc = (s['accuracy'] - avg_stats['accuracy']) if is_single_match else None
@@ -568,7 +575,7 @@ with tab_map:
         stat_box('% Positive ΔxT', f"{s['pos_pct']:.1f}%", f"Positive count: {s['successful']}", accent='blue', delta=d_pospct)
 
         d_highpct = (s['high_xt_pct'] - avg_stats['high_xt_pct']) if is_single_match else None
-        stat_box('% ΔxT > 0.05', f"{s['high_xt_pct']:.1f}%", "Actions generating high threat", accent='cyan', delta=d_highpct)
+        stat_box('% ΔxT > 0.1', f"{s['high_xt_pct']:.1f}%", "Actions generating high threat", accent='cyan', delta=d_highpct)
 
         c1,c2=st.columns(2)
         with c1: stat_box('Σ End xT', f"{s['xt_end_sum']:.2f}", accent='purple', 
@@ -656,7 +663,7 @@ with tab_analysis:
          delta=(s_an['sum_dxt']-avg_stats['sum_dxt']) if is_an_single else None)
     _kpi(k3,'% Positive ΔxT', f"{s_an['pos_pct']:.1f}%", f"Count w/ ΔxT > 0",'#3b82f6', 
          delta=(s_an['pos_pct']-avg_stats['pos_pct']) if is_an_single else None)
-    _kpi(k4,'% ΔxT > 0.05', f"{s_an['high_xt_pct']:.1f}%", "Actions generating high threat",'#06b6d4', 
+    _kpi(k4,'% ΔxT > 0.1', f"{s_an['high_xt_pct']:.1f}%", "Actions generating high threat",'#06b6d4', 
          delta=(s_an['high_xt_pct']-avg_stats['high_xt_pct']) if is_an_single else None)
 
     st.markdown('<div style="height:8px;"></div>',unsafe_allow_html=True)
