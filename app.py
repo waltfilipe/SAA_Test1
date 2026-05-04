@@ -26,7 +26,7 @@ st.markdown('''
 .streamlit-expanderHeader{color:#ffffff!important;}
 .streamlit-expander{background:rgba(255,255,255,.02);}
 .filter-panel{
-  background:linear-gradient(168deg,rgba(30,39,56,.92) 0%,rgba(22,28,40,.97) 100%);
+  background:linear-gradient(168deg,rgba(30,41,59,.92) 0%,rgba(15,23,42,.97) 100%);
   border:1px solid rgba(255,255,255,.08);border-radius:14px;
   padding:20px 14px 16px 14px;
   box-shadow:0 4px 24px rgba(0,0,0,.25),0 1px 4px rgba(0,0,0,.12);
@@ -49,21 +49,32 @@ st.markdown('''
 .stat-box .sb-label{font-size:10px;color:#94a3b8;letter-spacing:.7px;text-transform:uppercase;font-weight:600;}
 .stat-box .sb-value{font-size:22px;font-weight:700;color:#f1f5f9;line-height:1.15;margin-top:2px;}
 .stat-box .sb-sub{font-size:10px;color:#64748b;margin-top:3px;}
+.section-title {font-size:22px; font-weight:800; color:#ffffff; margin:0 0 16px 0; padding-bottom:6px; border-bottom:1px solid rgba(255,255,255,0.1); letter-spacing:0.5px;}
 </style>
 ''', unsafe_allow_html=True)
 
-def small_metric(label, value, delta=None):
-    html = (f'<div class="small-metric"><div class="label">{label}</div>'
-            f'<div class="value">{value}</div>')
+def stat_box(label, value, sub=None, accent='blue', delta=None, delta_good_is_up=True):
+    html = f'<div class="stat-box stat-box-accent-{accent}">'
+    html += f'<div class="sb-label">{label}</div>'
+    html += f'<div style="display:flex; align-items:baseline; gap:8px;">'
+    html += f'<div class="sb-value">{value}</div>'
+    
     if delta is not None:
-        html += f'<div class="delta">{delta}</div>'
-    html += '</div>'
-    st.markdown(html, unsafe_allow_html=True)
+        if delta > 0:
+            color = "#10b981" if delta_good_is_up else "#ef4444"
+            arrow = "↑"
+        elif delta < 0:
+            color = "#ef4444" if delta_good_is_up else "#10b981"
+            arrow = "↓"
+        else:
+            color = "#94a3b8"
+            arrow = "−"
+        
+        # Formata delta mantendo o tipo (int ou float)
+        delta_str = f"{abs(delta):.1f}" if isinstance(delta, float) else f"{abs(delta)}"
+        html += f'<div style="font-size:13px; font-weight:700; color:{color};">{arrow} {delta_str}</div>'
 
-def stat_box(label, value, sub=None, accent='blue'):
-    html = (f'<div class="stat-box stat-box-accent-{accent}">'
-            f'<div class="sb-label">{label}</div>'
-            f'<div class="sb-value">{value}</div>')
+    html += '</div>'
     if sub:
         html += f'<div class="sb-sub">{sub}</div>'
     html += '</div>'
@@ -85,16 +96,17 @@ D_REF, D_SCALE, BONUS_CAP = 10.0, 20.0, 0.60
 FIG_W, FIG_H = 9.2, 6.1
 FIG_DPI      = 130
 
-# Mais vivas: amarelo vibrante -> laranja -> vermelho intenso
+# Cores pastéis elegantes para as setas (Amarelo suave -> Laranja -> Vermelho rosado)
 CMAP_TOP15 = LinearSegmentedColormap.from_list(
-    "top15", ["#ffee00", "#ffaa00", "#ff3300", "#e60000", "#990000"]
+    "top15", ["#fde047", "#f59e0b", "#f43f5e", "#e11d48", "#be123c"]
 )
 NORM_TOP15 = Normalize(vmin=0.1, vmax=0.5)
 
+# Cores mais claras e suaves para o Pass Density
 CMAP_DENSITY = LinearSegmentedColormap.from_list(
     "density",
-    ["#04000f", "#120040", "#2e0064", "#1a198e", "#1264aa",
-     "#0891b2", "#0d9488", "#ca8a04", "#ea580c", "#fbbf24", "#fef9c3"]
+    ["#0f172a", "#1e1b4b", "#312e81", "#1d4ed8", "#0ea5e9",
+     "#2dd4bf", "#ca8a04", "#f97316", "#fcd34d", "#fef08a"]
 )
 
 # =============================================================================
@@ -276,7 +288,7 @@ df_all=pd.concat(dfs_by_match.values(),ignore_index=True)
 full_data={'All Matches':df_all}; full_data.update(dfs_by_match)
 
 # =============================================================================
-# Stats
+# Stats & Aggregation
 # =============================================================================
 def compute_stats(df):
     total=len(df); successful=int(df['is_won'].sum())
@@ -286,6 +298,10 @@ def compute_stats(df):
     pos_mask=succ_mask&(df['delta_xt_adj']>0); pos_count=int(pos_mask.sum())
     pos_mean=float(df.loc[pos_mask,'delta_xt_adj'].mean()) if pos_count else 0.0
     pos_pct=(pos_count/total*100) if total else 0.0
+    
+    high_xt_count = int((df['delta_xt_adj'] > 0.05).sum())
+    high_xt_pct = (high_xt_count / total * 100) if total else 0.0
+    
     top15_df=df.loc[pos_mask].sort_values('delta_xt_adj',ascending=False).head(15)
     top15_sum =float(top15_df['delta_xt_adj'].sum())  if not top15_df.empty else 0.0
     top15_mean=float(top15_df['delta_xt_adj'].mean()) if not top15_df.empty else 0.0
@@ -293,29 +309,43 @@ def compute_stats(df):
     xt_end_mean=float(df.loc[succ_mask,'xt_end'].mean()) if succ_mask.any() else 0.0
     fail_mask=df['outcome']=='failed'; fail_count=int(fail_mask.sum())
     fail_xt_sum=float((1.0-df.loc[fail_mask,'xt_end']).sum()) if fail_count else 0.0
+    
     return {
         'total':total,'successful':successful,'failed':fail_count,
         'accuracy':round(accuracy,2),
         'sum_dxt':round(sum_dxt,4),'pos_pct':round(pos_pct,2),'pos_mean':round(pos_mean,4),
+        'high_xt_pct': round(high_xt_pct, 2),
         'top15_sum':round(top15_sum,4),'top15_mean':round(top15_mean,4),
         'xt_end_sum':round(xt_end_sum,4),'xt_end_mean':round(xt_end_mean,4),
         'fail_xt_sum':round(fail_xt_sum,4),
         'fwd':int(df['is_forward'].sum()),'bwd':int(df['is_backward'].sum()),'lat':int(df['is_lateral'].sum()),
     }
 
+# Calcular médias globais para o delta no painel
+all_match_stats = [compute_stats(recompute_bonus(full_data[k])) for k in matches_data.keys()]
+avg_stats = {}
+if all_match_stats:
+    for k in all_match_stats[0].keys():
+        avg_stats[k] = sum(m[k] for m in all_match_stats) / len(all_match_stats)
+
 # =============================================================================
 # Drawing helpers
 # =============================================================================
-def _base_pitch(bg='#1a1a2e', line_alpha=0.95, line_zorder=1.2):
+def _base_pitch(bg='#1a1a2e', line_alpha=0.95, line_zorder=1.2, solid_lines=False):
+    linestyle = '-' if solid_lines else '-'
     pitch = Pitch(pitch_type='statsbomb', pitch_color=bg,
-                  line_color='#ffffff', line_alpha=line_alpha, line_zorder=line_zorder)
+                  line_color='#ffffff', line_alpha=line_alpha, line_zorder=line_zorder, linestyle=linestyle)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor(bg); fig.set_dpi(FIG_DPI)
-    fig.subplots_adjust(bottom=0.09) # Space for attack arrow
+    fig.subplots_adjust(bottom=0.10) # Space for attack arrow
     return fig, ax, pitch
 
-def _attack_arrow(fig, ax):
-    ap = ax.get_position(); cx=(ap.x0+ap.x1)/2; sm=ap.y0-0.04
+def _attack_arrow(fig, ax, has_cbar=False):
+    ap = ax.get_position()
+    cx = (ap.x0 + ap.x1) / 2
+    if has_cbar:
+        cx -= 0.02 # Desloca ligeiramente para compensar a barra de gradiente
+    sm = ap.y0 - 0.04
     fig.patches.append(FancyArrowPatch(
         (cx-0.055,sm),(cx+0.055,sm),transform=fig.transFigure,
         arrowstyle='-|>',mutation_scale=13,linewidth=1.8,color='#cccccc'))
@@ -329,9 +359,9 @@ def _save_fig(fig):
     buf.seek(0); return Image.open(buf)
 
 def _draw_soft_arrow(pitch, ax, x0, y0, x1, y1, color, is_sel=False):
-    width = 2.0; hw = 4.0; hl = 4.0; alpha = 0.95
+    width = 2.2; hw = 4.5; hl = 4.5; alpha = 0.95
     if is_sel:
-        color = '#00f0ff'; alpha = 1.0; width = 3.0; hw = 5.0; hl = 5.0
+        color = '#00f0ff'; alpha = 1.0; width = 3.5; hw = 5.5; hl = 5.5
         
     pitch.arrows(x0, y0, x1, y1,
                  color=color, width=width, headwidth=hw, headlength=hl,
@@ -347,7 +377,6 @@ def _draw_soft_arrow(pitch, ax, x0, y0, x1, y1, color, is_sel=False):
 def draw_top15_map(df, title, selected_num=None):
     fig, ax, pitch = _base_pitch()
     
-    # Linha tracejada bem clara
     ax.axvline(x=FINAL_THIRD_LINE_X, color='#ffffff', lw=1.15, alpha=0.15, linestyle='--')
     ax.axvline(x=HALF_LINE_X,        color='#ffffff',  lw=0.6,  alpha=0.10, linestyle='--')
 
@@ -367,8 +396,6 @@ def draw_top15_map(df, title, selected_num=None):
                              float(row.x_start), float(row.y_start),
                              float(row.x_end),   float(row.y_end),
                              color, is_sel)
-
-    ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
     
     sm = plt.cm.ScalarMappable(cmap=CMAP_TOP15, norm=NORM_TOP15)
     cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.03, shrink=0.65)
@@ -376,7 +403,7 @@ def draw_top15_map(df, title, selected_num=None):
     cbar.ax.yaxis.set_tick_params(color='#ffffff', labelsize=8)
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffffff')
 
-    _attack_arrow(fig, ax)
+    _attack_arrow(fig, ax, has_cbar=True)
     return _save_fig(fig), ax, fig, top15
 
 # =============================================================================
@@ -385,7 +412,7 @@ def draw_top15_map(df, title, selected_num=None):
 def _zone_bins():
     return np.linspace(0, FIELD_X, 7), np.array([0.0, LANE_RIGHT_MAX, LANE_LEFT_MIN, FIELD_Y])
 
-def draw_corridor_heatmap(df, title='Zone Heatmap — Completed'):
+def draw_corridor_heatmap(df):
     df_s=df[df['is_won']].copy()
     x_bins,_=_zone_bins()
     corridors={'left':(LANE_LEFT_MIN,FIELD_Y),'center':(LANE_RIGHT_MAX,LANE_LEFT_MIN),'right':(0.0,LANE_RIGHT_MAX)}
@@ -414,14 +441,13 @@ def draw_corridor_heatmap(df, title='Zone Heatmap — Completed'):
                     fontsize=10,fontweight='700' if value>=vmax*0.5 else '600',zorder=4)
     ax.axhline(y=LANE_LEFT_MIN, color='#ffffff',lw=0.5,alpha=0.15,linestyle='--',zorder=3)
     ax.axhline(y=LANE_RIGHT_MAX,color='#ffffff',lw=0.5,alpha=0.15,linestyle='--',zorder=3)
-    ax.set_title(title,fontsize=11,color='#ffffff',pad=7)
-    _attack_arrow(fig, ax)
+    _attack_arrow(fig, ax, has_cbar=False)
     return _save_fig(fig), ax, fig
 
 # =============================================================================
 # Density heatmap
 # =============================================================================
-def draw_density_heatmap(df, title='Pass Density'):
+def draw_density_heatmap(df):
     NX_D, NY_D = 30, 20
     x_edges = np.linspace(0, FIELD_X, NX_D+1)
     y_edges = np.linspace(0, FIELD_Y, NY_D+1)
@@ -431,7 +457,8 @@ def draw_density_heatmap(df, title='Pass Density'):
     counts, _, _ = np.histogram2d(all_x, all_y, bins=[x_edges, y_edges])
     counts = gaussian_filter(counts.T.astype(float), sigma=0.85)
 
-    fig, ax, pitch = _base_pitch(bg='#04000f', line_zorder=5)
+    # Linhas do campo sólidas e em primeiro plano (zorder elevado)
+    fig, ax, pitch = _base_pitch(bg='#0f172a', line_zorder=5, solid_lines=True)
 
     vmax = max(1.0, counts.max())
     norm = Normalize(vmin=0, vmax=vmax)
@@ -440,7 +467,7 @@ def draw_density_heatmap(df, title='Pass Density'):
     for iy in range(NY_D):
         for ix in range(NX_D):
             val = counts[iy, ix]
-            face_c = CMAP_DENSITY(norm(val)) if val >= 0.04 else '#04000f'
+            face_c = CMAP_DENSITY(norm(val)) if val >= 0.04 else '#0f172a'
             x0_ = x_edges[ix]   + margin
             x1_ = x_edges[ix+1] - margin
             y0_ = y_edges[iy]   + margin
@@ -453,13 +480,12 @@ def draw_density_heatmap(df, title='Pass Density'):
                 alpha=0.88, zorder=2
             ))
 
-    ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
     sm=plt.cm.ScalarMappable(cmap=CMAP_DENSITY,norm=norm)
     cbar=fig.colorbar(sm,ax=ax,fraction=0.016,pad=0.02,shrink=0.70)
     cbar.set_label('Density',color='#a0b4c8',fontsize=8,labelpad=2)
     cbar.ax.yaxis.set_tick_params(color='#a0b4c8',labelsize=6)
     plt.setp(plt.getp(cbar.ax.axes,'yticklabels'),color='#a0b4c8')
-    _attack_arrow(fig, ax)
+    _attack_arrow(fig, ax, has_cbar=True)
     return _save_fig(fig), ax, fig
 
 # =============================================================================
@@ -471,7 +497,7 @@ for key,default in [('selected_action',None),('last_map_click',None),('last_matc
 # =============================================================================
 # TABS
 # =============================================================================
-tab_map, tab_analysis = st.tabs(['📍 Map', '📊 Analyses'])
+tab_map, tab_analysis = st.tabs(['📍 Map', '📊 Stats'])
 
 # =============================================================================
 # TAB MAP
@@ -494,13 +520,14 @@ with tab_map:
         st.session_state['last_match']=selected_match
 
     df_base=recompute_bonus(full_data[selected_match].copy())
+    s=compute_stats(df_base)
 
     with col_map:
         cur_sel=st.session_state.get('selected_action')
         sel_num=int(cur_sel['number']) if cur_sel is not None else None
 
-        st.markdown('<h4 style="color:#ffffff;margin:2px 0 4px 0;">Top 15 ΔxT</h4>',unsafe_allow_html=True)
-        img_obj,ax,fig,top15_df=draw_top15_map(df_base,title=f'Top 15 ΔxT — {selected_match}',selected_num=sel_num)
+        st.markdown('<div class="section-title">Top Actions Map</div>', unsafe_allow_html=True)
+        img_obj,ax,fig,top15_df=draw_top15_map(df_base,title="",selected_num=sel_num)
 
         MAP_W=880
         click=streamlit_image_coordinates(img_obj,width=MAP_W,key='map_img')
@@ -517,26 +544,38 @@ with tab_map:
         plt.close(fig)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        tab_zh, tab_pd = st.tabs(["Zone Heatmap", "Pass Density"])
-        with tab_zh:
+        heatmap_mode = st.radio("Select View", ["Zone Heatmap", "Pass Density"], horizontal=True, label_visibility="collapsed")
+        
+        if heatmap_mode == "Zone Heatmap":
             zh_img,_,zh_fig=draw_corridor_heatmap(df_base)
             st.image(zh_img,use_container_width=True); plt.close(zh_fig)
-        with tab_pd:
+        else:
             dh_img,_,dh_fig=draw_density_heatmap(df_base)
             st.image(dh_img,use_container_width=True); plt.close(dh_fig)
 
     with col_stats:
-        s=compute_stats(df_base)
+        
+        # Exibimos delta de variação com a média apenas se não for "All Matches"
+        is_single_match = (selected_match != 'All Matches')
+        
+        d_acc = (s['accuracy'] - avg_stats['accuracy']) if is_single_match else None
+        stat_box('Accuracy', f"{s['accuracy']:.1f}%", f"{s['successful']} successful / {s['total']} total", accent='green', delta=d_acc)
+        
+        d_dxt = (s['sum_dxt'] - avg_stats['sum_dxt']) if is_single_match else None
+        stat_box('Σ ΔxT', f"{s['sum_dxt']:.3f}", f"Avg positive: {s['pos_mean']:.3f}", accent='amber', delta=d_dxt)
+        
+        d_pospct = (s['pos_pct'] - avg_stats['pos_pct']) if is_single_match else None
+        stat_box('% Positive ΔxT', f"{s['pos_pct']:.1f}%", f"Positive count: {s['successful']}", accent='blue', delta=d_pospct)
 
-        stat_box('Accuracy',    f"{s['accuracy']:.1f}%",
-                 f"{s['successful']} successful / {s['total']} total", accent='green')
-        stat_box('Σ ΔxT',       f"{s['sum_dxt']:.3f}",
-                 f"Avg positive: {s['pos_mean']:.3f}", accent='amber')
-        stat_box('% Positive ΔxT', f"{s['pos_pct']:.1f}%",
-                 f"Positive count: {s['successful']}", accent='blue')
+        d_highpct = (s['high_xt_pct'] - avg_stats['high_xt_pct']) if is_single_match else None
+        stat_box('% ΔxT > 0.05', f"{s['high_xt_pct']:.1f}%", "Actions generating high threat", accent='cyan', delta=d_highpct)
+
         c1,c2=st.columns(2)
-        with c1: stat_box('Σ End xT',    f"{s['xt_end_sum']:.2f}",  accent='cyan')
-        with c2: stat_box('Σ xT Failed', f"{s['fail_xt_sum']:.2f}", accent='red')
+        with c1: stat_box('Σ End xT', f"{s['xt_end_sum']:.2f}", accent='purple', 
+                          delta=(s['xt_end_sum']-avg_stats['xt_end_sum']) if is_single_match else None)
+        with c2: stat_box('Σ xT Failed', f"{s['fail_xt_sum']:.2f}", accent='red', 
+                          delta=(s['fail_xt_sum']-avg_stats['fail_xt_sum']) if is_single_match else None, delta_good_is_up=False)
+
         st.markdown(
             f'<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:8px;">'
             f'<div class="stat-box" style="text-align:center;">'
@@ -579,4 +618,56 @@ with tab_map:
 # TAB ANALYSES
 # =============================================================================
 with tab_analysis:
-    st.info("Analyses panel can be further customized here.")
+    st.markdown('<div class="section-title">Stats</div>', unsafe_allow_html=True)
+    sel_an=st.selectbox('Match',list(full_data.keys()),index=0,key='an_match')
+    df_an=recompute_bonus(full_data[sel_an].copy()); s_an=compute_stats(df_an)
+    is_an_single = (sel_an != 'All Matches')
+
+    k1,k2,k3,k4=st.columns(4)
+    
+    def _kpi(col,label,value,sub,border, delta=None, delta_good_is_up=True):
+        delta_html = ""
+        if delta is not None:
+            if delta > 0:
+                c_delta = "#10b981" if delta_good_is_up else "#ef4444"
+                arr = "↑"
+            elif delta < 0:
+                c_delta = "#ef4444" if delta_good_is_up else "#10b981"
+                arr = "↓"
+            else:
+                c_delta = "#94a3b8"
+                arr = "−"
+            delta_html = f'<span style="font-size:14px; font-weight:700; color:{c_delta}; margin-left:10px;">{arr} {abs(delta):.1f}</span>'
+
+        col.markdown(
+            f'<div style="background:rgba(255,255,255,.04);border-left:4px solid {border};'
+            f'border-radius:11px;padding:14px 16px; margin-bottom:12px;">'
+            f'<div style="font-size:10px;color:#94a3b8;letter-spacing:.7px;text-transform:uppercase;font-weight:600;">{label}</div>'
+            f'<div style="display:flex; align-items:baseline;">'
+            f'<div style="font-size:28px;font-weight:700;color:#ffffff;line-height:1.15;">{value}</div>'
+            f'{delta_html}'
+            f'</div>'
+            f'<div style="font-size:10px;color:#64748b;margin-top:4px;">{sub}</div></div>',
+            unsafe_allow_html=True)
+
+    _kpi(k1,'Accuracy', f"{s_an['accuracy']:.1f}%", f"{s_an['successful']} / {s_an['total']} successful",'#10b981', 
+         delta=(s_an['accuracy']-avg_stats['accuracy']) if is_an_single else None)
+    _kpi(k2,'Σ ΔxT', f"{s_an['sum_dxt']:.3f}", f"Avg positive ΔxT: {s_an['pos_mean']:.3f}",'#f59e0b', 
+         delta=(s_an['sum_dxt']-avg_stats['sum_dxt']) if is_an_single else None)
+    _kpi(k3,'% Positive ΔxT', f"{s_an['pos_pct']:.1f}%", f"Count w/ ΔxT > 0",'#3b82f6', 
+         delta=(s_an['pos_pct']-avg_stats['pos_pct']) if is_an_single else None)
+    _kpi(k4,'% ΔxT > 0.05', f"{s_an['high_xt_pct']:.1f}%", "Actions generating high threat",'#06b6d4', 
+         delta=(s_an['high_xt_pct']-avg_stats['high_xt_pct']) if is_an_single else None)
+
+    st.markdown('<div style="height:8px;"></div>',unsafe_allow_html=True)
+    p1,p2,p3,p4=st.columns(4)
+    with p1: small_metric('Σ Top 15 ΔxT',  f"{s_an['top15_sum']:.3f}")
+    with p2: small_metric('Avg Top 15 ΔxT', f"{s_an['top15_mean']:.3f}")
+    with p3: small_metric('Σ End xT',        f"{s_an['xt_end_sum']:.3f}")
+    with p4: small_metric('Σ xT Failed',     f"{s_an['fail_xt_sum']:.3f}")
+
+    st.markdown('<div style="height:4px;"></div>',unsafe_allow_html=True)
+    d1,d2,d3=st.columns(3)
+    with d1: small_metric('Forward',  f"{s_an['fwd']}", delta=f"{s_an['fwd']/max(s_an['total'],1)*100:.0f}% of total")
+    with d2: small_metric('Backward', f"{s_an['bwd']}", delta=f"{s_an['bwd']/max(s_an['total'],1)*100:.0f}% of total")
+    with d3: small_metric('Lateral',  f"{s_an['lat']}", delta=f"{s_an['lat']/max(s_an['total'],1)*100:.0f}% of total")
