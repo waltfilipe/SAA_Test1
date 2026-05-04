@@ -17,7 +17,7 @@ from collections import defaultdict
 # =============================================================================
 # Page + Style
 # =============================================================================
-st.set_page_config(layout="wide", page_title="Pass Map Dashboard — Pressão + deltaxT")
+st.set_page_config(layout="wide", page_title="Pass Map Dashboard")
 
 st.markdown("""
 <style>
@@ -47,7 +47,7 @@ def small_metric(label: str, value: str, delta: str | None = None):
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
-st.title("Pass Map Dashboard — Pressão + deltaxT")
+st.title("Pass Map Dashboard")
 
 # =============================================================================
 # Constants
@@ -62,26 +62,17 @@ NX, NY = 16, 12
 FIG_W, FIG_H = 7.9, 5.3
 FIG_DPI = 110
 
-# Visual map rules (pedido)
-DELTA_XT_THRESHOLD = 0.05
-COLOR_FAIL = "#E07070"      # errados
-COLOR_PASS = "#2F80ED"      # válidos no mapa (>=0.05)
-COLOR_TOP10 = "#D4AF37"     # top10
-ALPHA_FAIL = 0.72
-ALPHA_PASS = 0.58
-ALPHA_TOP10 = 0.90
+DELTA_THR = 0.05
 
-PRESSURE_BONUS = {
-    "0-0": 0.00,
-    "1-0": 0.06,
-    "0-1": 0.06,
-    "1-1": 0.12,
-}
+COLOR_FAIL_LIGHT = "#F2A7A7"
+COLOR_ALL_PASS_LIGHT = "#E4E7EE"
+
+PRESSURE_BONUS = {"0-0": 0.00, "1-0": 0.06, "0-1": 0.06, "1-1": 0.12}
 PRESSURE_LABEL = {
-    "0-0": "Sem pressão",
-    "1-0": "Pressão na origem",
-    "0-1": "Pressão no destino",
-    "1-1": "Pressão em ambos",
+    "0-0": "No pressure",
+    "1-0": "Pressure at origin",
+    "0-1": "Pressure at destination",
+    "1-1": "Pressure at both",
 }
 
 # =============================================================================
@@ -89,12 +80,12 @@ PRESSURE_LABEL = {
 # =============================================================================
 @st.cache_data(show_spinner=False)
 def compute_xt_grid(NX=16, NY=12, sub=24,
-    goal_width=11.0, penalty_depth=18.5, penalty_width=45.32,
-    prox_w=0.50, central_w=0.50,
-    internal_prox_power=2.8, internal_central_power=2.4, center_boost=0.20,
-    FUNNEL_INFLUENCE_RANGE=35.0, FUNNEL_POWER=1.3, BASE_BOOST_WEIGHT=0.15,
-    band_width_m=180.0, blur_window_m=60.0, final_blur_m=12.0,
-    ANGLE_WEIGHT=0.50, ANGLE_POWER=1.4, BASE_ANGLE_WEIGHT=0.40):
+                    goal_width=11.0, penalty_depth=18.5, penalty_width=45.32,
+                    prox_w=0.50, central_w=0.50,
+                    internal_prox_power=2.8, internal_central_power=2.4, center_boost=0.20,
+                    FUNNEL_INFLUENCE_RANGE=35.0, FUNNEL_POWER=1.3, BASE_BOOST_WEIGHT=0.15,
+                    band_width_m=180.0, blur_window_m=60.0, final_blur_m=12.0,
+                    ANGLE_WEIGHT=0.50, ANGLE_POWER=1.4, BASE_ANGLE_WEIGHT=0.40):
 
     ncols_hr = NX * sub
     nrows_hr = NY * sub
@@ -159,7 +150,7 @@ def compute_xt_grid(NX=16, NY=12, sub=24,
 
     def blur(a, rx, ry):
         H, W = a.shape
-        p = np.pad(a, ((ry, ry), (rx, rx)), mode="edge").astype(np.float64)
+        p = np.pad(a, ((ry, ry), (rx, rx)), mode='edge').astype(np.float64)
         ii = p.cumsum(0).cumsum(1)
         s = ii[2*ry:2*ry+H, 2*rx:2*rx+W].copy()
         s += ii[:H, :W]
@@ -191,7 +182,7 @@ def xt_value(x, y):
     return float(XT_GRID[iy, ix])
 
 # =============================================================================
-# Fixed data (1 partida consolidada)
+# Fixed data
 # =============================================================================
 def build_raw_passes():
     completed = [
@@ -293,19 +284,19 @@ def build_dataset(seed=42):
     d["outcome"] = np.where(d["is_won"], "completed", "incomplete")
     d["xt_start"] = d.apply(lambda r: xt_value(r.x_start, r.y_start), axis=1)
     d["xt_end"] = d.apply(lambda r: xt_value(r.x_end, r.y_end), axis=1)
-    d["deltaxT"] = np.where(d["is_won"], d["xt_end"] - d["xt_start"], 0.0)  # sem pressão no nome
+    d["ΔxT"] = np.where(d["is_won"], d["xt_end"] - d["xt_start"], 0.0)
     d["pressure_bonus"] = d["pressure_tag"].map(PRESSURE_BONUS).fillna(0.0)
-    d["deltaxT_final"] = np.where(d["is_won"], d["deltaxT"] * (1 + d["pressure_bonus"]), 0.0)
+    d["ΔxT_final"] = np.where(d["is_won"], d["ΔxT"] * (1 + d["pressure_bonus"]), 0.0)
     d["pass_distance"] = np.sqrt((d.x_end - d.x_start)**2 + (d.y_end - d.y_start)**2)
 
-    # rank global por deltaxT (somente completos)
-    d["rank_deltaxT"] = np.nan
-    comp_idx = d[d["is_won"]].sort_values("deltaxT", ascending=False).index
-    d.loc[comp_idx, "rank_deltaxT"] = np.arange(1, len(comp_idx) + 1, dtype=float)
+    # Global rank by ΔxT (completed only)
+    d["rank_ΔxT"] = np.nan
+    comp_idx = d[d["is_won"]].sort_values("ΔxT", ascending=False).index
+    d.loc[comp_idx, "rank_ΔxT"] = np.arange(1, len(comp_idx) + 1, dtype=float)
     return d
 
 # =============================================================================
-# Draw helpers
+# Drawing
 # =============================================================================
 def _base_pitch():
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e",
@@ -332,8 +323,84 @@ def _save_fig(fig):
     buf.seek(0)
     return Image.open(buf)
 
-def draw_corridor_heatmap(df: pd.DataFrame,
-                          title: str = "Zone Heatmap — Completed Passes"):
+def draw_pass_map(df: pd.DataFrame, mode: str):
+    """
+    mode:
+      - "Top 10 by ΔxT"
+      - "Errors only"
+      - "All passes"
+    """
+    fig, ax, pitch = _base_pitch()
+
+    if mode == "Top 10 by ΔxT":
+        top10 = df[df["is_won"]].sort_values("ΔxT", ascending=False).head(10).copy()
+        if top10.empty:
+            ax.set_title("Pass Map — Top 10 by ΔxT", fontsize=12, color="#ffffff", pad=8)
+            _attack_arrow(fig)
+            return _save_fig(fig), ax, fig
+
+        vmin = float(top10["ΔxT"].min())
+        vmax = float(top10["ΔxT"].max())
+        norm = Normalize(vmin=vmin, vmax=vmax if vmax > vmin else vmin + 1e-6)
+        cmap = plt.cm.YlOrRd
+
+        for _, row in top10.iterrows():
+            color = cmap(norm(float(row["ΔxT"])))
+            pitch.arrows(row.x_start,row.y_start,row.x_end,row.y_end,
+                         color=color,width=2.05,headwidth=2.35,headlength=2.35,
+                         ax=ax,zorder=8,alpha=0.90)
+            pitch.scatter(row.x_start,row.y_start,s=58,marker="o",color=color,
+                          edgecolors="white",linewidths=0.9,ax=ax,zorder=9,alpha=0.92)
+
+        ax.set_title("Pass Map — Top 10 by ΔxT", fontsize=12, color="#ffffff", pad=8)
+        leg = ax.legend(handles=[
+            Line2D([0],[0],color=plt.cm.YlOrRd(0.25),lw=2.8,label="Lower in Top 10",alpha=0.95),
+            Line2D([0],[0],color=plt.cm.YlOrRd(0.95),lw=2.8,label="Higher in Top 10",alpha=0.95),
+        ], loc="upper left", bbox_to_anchor=(0.01,0.99), frameon=True,
+           facecolor="#1a1a2e", edgecolor="#444466", fontsize="x-small",
+           labelspacing=0.5, borderpad=0.5)
+        for t in leg.get_texts():
+            t.set_color("white")
+        leg.get_frame().set_alpha(0.92)
+
+    elif mode == "Errors only":
+        err = df[~df["is_won"]].copy()
+        for _, row in err.iterrows():
+            pitch.arrows(row.x_start,row.y_start,row.x_end,row.y_end,
+                         color=COLOR_FAIL_LIGHT,width=1.7,headwidth=2.2,headlength=2.2,
+                         ax=ax,zorder=4,alpha=0.90)
+            pitch.scatter(row.x_start,row.y_start,s=42,marker="o",color=COLOR_FAIL_LIGHT,
+                          edgecolors="white",linewidths=0.7,ax=ax,zorder=5,alpha=0.92)
+        ax.set_title("Pass Map — Errors only", fontsize=12, color="#ffffff", pad=8)
+
+    else:  # All passes
+        for _, row in df.iterrows():
+            if bool(row["is_won"]):
+                color, alpha = COLOR_ALL_PASS_LIGHT, 0.30
+            else:
+                color, alpha = COLOR_FAIL_LIGHT, 0.86
+
+            pitch.arrows(row.x_start,row.y_start,row.x_end,row.y_end,
+                         color=color,width=1.45,headwidth=2.15,headlength=2.15,
+                         ax=ax,zorder=4,alpha=alpha)
+            pitch.scatter(row.x_start,row.y_start,s=38,marker="o",color=color,
+                          edgecolors="white",linewidths=0.6,ax=ax,zorder=5,alpha=alpha)
+
+        ax.set_title("Pass Map — All passes", fontsize=12, color="#ffffff", pad=8)
+        leg = ax.legend(handles=[
+            Line2D([0],[0],color=COLOR_ALL_PASS_LIGHT,lw=2.5,label="Completed",alpha=0.70),
+            Line2D([0],[0],color=COLOR_FAIL_LIGHT,lw=2.5,label="Incomplete",alpha=0.90),
+        ], loc="upper left", bbox_to_anchor=(0.01,0.99), frameon=True,
+           facecolor="#1a1a2e", edgecolor="#444466", fontsize="x-small",
+           labelspacing=0.5, borderpad=0.5)
+        for t in leg.get_texts():
+            t.set_color("white")
+        leg.get_frame().set_alpha(0.92)
+
+    _attack_arrow(fig)
+    return _save_fig(fig), ax, fig
+
+def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Completed Passes"):
     df_s = df[df["is_won"]].copy()
     x_bins = np.linspace(0.0, FIELD_X, 7)
     corridors = {
@@ -353,13 +420,12 @@ def draw_corridor_heatmap(df: pd.DataFrame,
 
     all_vals = np.concatenate([counts[c] for c in counts]) if len(df_s) else np.array([0])
     vmax = max(1, int(all_vals.max()))
-    cmap = LinearSegmentedColormap.from_list(
-        "wr",["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
+    cmap = LinearSegmentedColormap.from_list("wr",["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
     norm = Normalize(vmin=0, vmax=vmax)
     threshold = max(1, vmax*0.35)
 
-    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
-    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    pitch = Pitch(pitch_type="statsbomb",pitch_color="#1a1a2e",line_color="#ffffff",line_alpha=0.95)
+    fig, ax = pitch.draw(figsize=(FIG_W,FIG_H))
     fig.set_facecolor("#1a1a2e")
     fig.set_dpi(FIG_DPI)
 
@@ -375,7 +441,7 @@ def draw_corridor_heatmap(df: pd.DataFrame,
                     fontsize=11,fontweight="700" if value>=vmax*0.5 else "600",zorder=4)
 
     ax.set_title(title,fontsize=12,color="#ffffff",pad=8)
-    ax.axhline(y=LANE_LEFT_MIN, color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
+    ax.axhline(y=LANE_LEFT_MIN,color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
     ax.axhline(y=LANE_RIGHT_MAX,color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
     _attack_arrow(fig)
     return _save_fig(fig), ax, fig
@@ -414,8 +480,9 @@ def draw_top_connection_minimaps(df: pd.DataFrame, top_k: int = 3,
 
     for idx, ax in enumerate(axes):
         pitch.draw(ax=ax)
-        ax.axhline(y=LANE_LEFT_MIN, color="#ffffff",lw=0.4,alpha=0.12,linestyle="--")
+        ax.axhline(y=LANE_LEFT_MIN,color="#ffffff",lw=0.4,alpha=0.12,linestyle="--")
         ax.axhline(y=LANE_RIGHT_MAX,color="#ffffff",lw=0.4,alpha=0.12,linestyle="--")
+
         if idx >= len(links):
             ax.set_title("—",fontsize=9,color="#dbeafe",pad=4)
             continue
@@ -453,238 +520,226 @@ def draw_top_connection_minimaps(df: pd.DataFrame, top_k: int = 3,
     buf.seek(0)
     return Image.open(buf), axes, fig
 
-def draw_pass_map(df: pd.DataFrame, title: str, top10_ids: set[int]):
-    fig, ax, pitch = _base_pitch()
-
-    base_df = df[~df["number"].isin(top10_ids)]
-    top_df = df[df["number"].isin(top10_ids)]
-
-    # base
-    for _, row in base_df.iterrows():
-        if not bool(row["is_won"]):
-            color, alpha, lw, sz = COLOR_FAIL, ALPHA_FAIL, 1.7, 44
-        else:
-            # só chegou aqui se deltaxT >= 0.05 (filtrado antes)
-            color, alpha, lw, sz = COLOR_PASS, ALPHA_PASS, 1.65, 44
-
-        pitch.arrows(row.x_start,row.y_start,row.x_end,row.y_end,
-                     color=color,width=lw,headwidth=2.25,headlength=2.25,ax=ax,zorder=4,alpha=alpha)
-        pitch.scatter(row.x_start,row.y_start,s=sz,marker="o",color=color,
-                      edgecolors="white",linewidths=0.75,ax=ax,zorder=5,alpha=alpha)
-
-    # top10 por cima
-    for _, row in top_df.iterrows():
-        pitch.arrows(row.x_start,row.y_start,row.x_end,row.y_end,
-                     color=COLOR_TOP10,width=2.05,headwidth=2.35,headlength=2.35,ax=ax,zorder=8,alpha=ALPHA_TOP10)
-        pitch.scatter(row.x_start,row.y_start,s=58,marker="o",color=COLOR_TOP10,
-                      edgecolors="white",linewidths=0.9,ax=ax,zorder=9,alpha=ALPHA_TOP10)
-
-    ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
-    leg = ax.legend(handles=[
-        Line2D([0],[0],color=COLOR_PASS, lw=2.6,label=f"Completed (deltaxT ≥ {DELTA_XT_THRESHOLD:.2f})", alpha=0.90),
-        Line2D([0],[0],color=COLOR_FAIL, lw=2.6,label="Incomplete", alpha=0.90),
-        Line2D([0],[0],color=COLOR_TOP10,lw=2.8,label="Top 10 deltaxT", alpha=0.95),
-    ], loc="upper left", bbox_to_anchor=(0.01,0.99), frameon=True,
-       facecolor="#1a1a2e", edgecolor="#444466", fontsize="x-small",
-       labelspacing=0.5, borderpad=0.5)
-    for t in leg.get_texts():
-        t.set_color("white")
-    leg.get_frame().set_alpha(0.92)
-
-    _attack_arrow(fig)
-    return _save_fig(fig), ax, fig
-
 # =============================================================================
-# Stats helpers
+# Stats
 # =============================================================================
-def compute_stats(df: pd.DataFrame) -> dict:
-    total = len(df)
-    completed = int(df["is_won"].sum())
-    acc = round(completed / max(total, 1) * 100, 2)
+def compute_stats(df_in: pd.DataFrame) -> dict:
+    total = len(df_in)
+    completed = int(df_in["is_won"].sum())
+    incomplete = total - completed
+    accuracy = round(completed / max(total, 1) * 100, 2)
 
-    comp = df[df["is_won"]]
-    sum_dxt = float(comp["deltaxT"].sum()) if not comp.empty else 0.0
-    mean_dxt = float(comp["deltaxT"].mean()) if not comp.empty else 0.0
-    pos_count = int((comp["deltaxT"] > 0).sum()) if not comp.empty else 0
-    ge005_count = int((comp["deltaxT"] >= DELTA_XT_THRESHOLD).sum()) if not comp.empty else 0
+    comp = df_in[df_in["is_won"]]
+    sum_dx = float(comp["ΔxT"].sum()) if not comp.empty else 0.0
+    mean_dx = float(comp["ΔxT"].mean()) if not comp.empty else 0.0
+    cnt_ge = int((comp["ΔxT"] >= DELTA_THR).sum()) if not comp.empty else 0
+    pct_ge = round(cnt_ge / max(total, 1) * 100, 2)
 
     by_pressure = (
-        df.groupby("pressure_tag", dropna=False)
-          .agg(
-              total=("number", "count"),
-              completed=("is_won", "sum"),
-              incomplete=("is_won", lambda s: int((~s).sum())),
-              sum_deltaxT=("deltaxT", "sum"),
-              mean_deltaxT=("deltaxT", "mean"),
-              ge005=("deltaxT", lambda s: int((s >= DELTA_XT_THRESHOLD).sum())),
-          )
-          .reset_index()
+        df_in.groupby("pressure_tag", dropna=False)
+        .agg(
+            total=("number","count"),
+            completed=("is_won","sum"),
+            incomplete=("is_won", lambda s: int((~s).sum())),
+            sum_ΔxT=("ΔxT","sum"),
+            mean_ΔxT=("ΔxT","mean"),
+            ge_thr=("ΔxT", lambda s: int((s >= DELTA_THR).sum())),
+        )
+        .reset_index()
     )
-    by_pressure["accuracy_pct"] = np.where(
-        by_pressure["total"] > 0,
-        by_pressure["completed"] / by_pressure["total"] * 100,
-        0.0
-    )
+    by_pressure["accuracy_pct"] = np.where(by_pressure["total"] > 0, by_pressure["completed"] / by_pressure["total"] * 100, 0)
+    by_pressure["ge_thr_pct_total"] = np.where(by_pressure["total"] > 0, by_pressure["ge_thr"] / by_pressure["total"] * 100, 0)
     by_pressure["pressure_label"] = by_pressure["pressure_tag"].map(PRESSURE_LABEL)
     by_pressure = by_pressure.sort_values("pressure_tag")
 
     return {
-        "total_passes": total,
-        "completed_passes": completed,
-        "incomplete_passes": total - completed,
-        "accuracy_pct": acc,
-        "sum_deltaxT": sum_dxt,
-        "mean_deltaxT": mean_dxt,
-        "positive_deltaxT_count": pos_count,
-        "ge005_count": ge005_count,
+        "total": total,
+        "completed": completed,
+        "incomplete": incomplete,
+        "accuracy": accuracy,
+        "sum_ΔxT": sum_dx,
+        "mean_ΔxT": mean_dx,
+        "cnt_ge": cnt_ge,
+        "pct_ge": pct_ge,
         "by_pressure": by_pressure
     }
 
 # =============================================================================
-# App data
+# Data
 # =============================================================================
 with st.sidebar:
-    st.markdown("### Configuração")
-    seed = st.number_input("Seed pressão", min_value=1, max_value=999999, value=42, step=1)
+    st.markdown("### Settings")
+    seed = st.number_input("Pressure seed", min_value=1, max_value=999999, value=42, step=1)
 
 df = build_dataset(seed=int(seed))
-
-# top10 global por deltaxT
-top10_global = (
-    df[df["is_won"]]
-    .sort_values("deltaxT", ascending=False)
-    .head(10)
-)
-top10_ids = set(top10_global["number"].astype(int).tolist())
 
 # =============================================================================
 # Tabs
 # =============================================================================
-tab_passmap, tab_analysis = st.tabs(["📋 Pass Map", "📈 Análise"])
+tab_map, tab_analysis = st.tabs(["📋 Map", "📈 Analysis"])
 
 # =============================================================================
-# TAB 1
+# TAB: MAP
 # =============================================================================
-with tab_passmap:
-    st.caption("Click the origin dot on the pass map to inspect an event.")
-    col_filters, col_field, col_stats = st.columns([0.9, 2, 1], gap="large")
+with tab_map:
+    st.caption("Click the origin marker on the pass map to inspect an event.")
+    col_filters, col_field = st.columns([0.9, 2], gap="large")
 
     with col_filters:
         st.markdown('<div class="filter-panel">', unsafe_allow_html=True)
-
-        st.markdown("### ⚡ Pressão")
-        pressure_filter = st.radio(
-            "Filter by pressure",
-            ["All", "0-0", "1-0", "0-1", "1-1"],
-            index=0,
-            key="pm_pressure"
+        st.markdown("### 🧭 View mode")
+        view_mode = st.radio(
+            "Map view",
+            ["Top 10 by ΔxT", "Errors only", "All passes"],
+            index=0
         )
-
         st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
-
-        st.markdown("### 🎯 Pass Filter")
-        pass_filter = st.radio(
-            "Filter passes",
-            ["All Passes", "Completed Only", "Incomplete Only"],
-            index=0,
-            key="pm_filter"
+        st.markdown("### ⚡ Pressure")
+        pressure_filter = st.radio(
+            "Pressure filter",
+            ["All", "0-0", "1-0", "0-1", "1-1"],
+            index=0
         )
-
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # base filters
     df_base = df.copy()
     if pressure_filter != "All":
-        df_base = df_base[df_base["pressure_tag"] == pressure_filter]
-
-    if pass_filter == "Completed Only":
-        df_base = df_base[df_base["is_won"]]
-    elif pass_filter == "Incomplete Only":
-        df_base = df_base[~df_base["is_won"]]
-
-    df_base = df_base.reset_index(drop=True)
-
-    # aplicar regra do mapa:
-    # remove completos com deltaxT < 0.05; mantém errados; mantém top10
-    df_for_map = df_base[
-        (~df_base["is_won"]) |
-        (df_base["deltaxT"] >= DELTA_XT_THRESHOLD) |
-        (df_base["number"].isin(top10_ids))
-    ].reset_index(drop=True)
-
-    for key,default in [("heat_sel_pm",None),("last_pressure_pm",pressure_filter),("last_filter_pm",pass_filter)]:
-        if key not in st.session_state:
-            st.session_state[key] = default
-    if st.session_state["last_pressure_pm"] != pressure_filter:
-        st.session_state["heat_sel_pm"] = None
-        st.session_state["last_pressure_pm"] = pressure_filter
-    if st.session_state["last_filter_pm"] != pass_filter:
-        st.session_state["heat_sel_pm"] = None
-        st.session_state["last_filter_pm"] = pass_filter
+        df_base = df_base[df_base["pressure_tag"] == pressure_filter].reset_index(drop=True)
 
     with col_field:
-        DW = 780
-        pm_placeholder = st.empty()
-
-        # Heatmap + interação de zona (igual dinâmica do app base)
-        st.markdown('<h4 style="color:#ffffff;margin:6px 0 6px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
-        heat_img,hax,hfig = draw_corridor_heatmap(df_base)
-        heat_click = streamlit_image_coordinates(heat_img,width=DW,key="pm_heat")
-        if heat_click is not None:
-            rw,rh = heat_img.size
-            px = heat_click["x"]*(rw/heat_click["width"])
-            py = heat_click["y"]*(rh/heat_click["height"])
-            fx,fy = hax.transData.inverted().transform((px,rh-py))
-            xb = np.linspace(0,FIELD_X,7)
-            ix = max(0,min(5,np.searchsorted(xb,fx,side="right")-1))
-            x0h,x1h = xb[ix],xb[ix+1]
-            if fy >= LANE_LEFT_MIN:      cn,y0h,y1h = "left",  LANE_LEFT_MIN, FIELD_Y
-            elif fy < LANE_RIGHT_MAX:    cn,y0h,y1h = "right", 0.0,           LANE_RIGHT_MAX
-            else:                        cn,y0h,y1h = "center",LANE_RIGHT_MAX,LANE_LEFT_MIN
-            st.session_state["heat_sel_pm"] = {
-                "ix":int(ix),"corridor":cn,
-                "x0":float(x0h),"x1":float(x1h),
-                "y0":float(y0h),"y1":float(y1h)}
-        plt.close(hfig)
-
-        st.markdown('<h4 style="color:#ffffff;margin:14px 0 4px 0;">Top Zone Connections</h4>', unsafe_allow_html=True)
-        mini_img,_,mini_fig = draw_top_connection_minimaps(df_base,top_k=3)
-        st.image(mini_img,use_container_width=True)
-        plt.close(mini_fig)
-
-        with pm_placeholder.container():
-            st.markdown('<h4 style="color:#ffffff;margin:0 0 6px 0;">Pass Map</h4>', unsafe_allow_html=True)
-            if st.button("Clear Zone Filter",key="pm_clear"):
-                st.session_state["heat_sel_pm"] = None
-
-            df_to_draw = df_for_map.copy()
-            if st.session_state["heat_sel_pm"] is not None:
-                sel = st.session_state["heat_sel_pm"]
-                df_to_draw = df_to_draw[
-                    (df_to_draw["x_end"]>=sel["x0"])&(df_to_draw["x_end"]<sel["x1"])
-                    &(df_to_draw["y_end"]>=sel["y0"])&(df_to_draw["y_end"]<sel["y1"])
-                ].reset_index(drop=True)
-
-            img_obj,ax,fig = draw_pass_map(df_to_draw,title="Pass Map — Pressão + deltaxT", top10_ids=top10_ids)
-            click = streamlit_image_coordinates(img_obj,width=DW,key="pm_map")
+        img_obj, ax, fig = draw_pass_map(df_base, view_mode)
+        click = streamlit_image_coordinates(img_obj, width=780, key="main_map")
 
         selected_pass = None
-        if click is not None and len(df_to_draw) > 0:
+        if click is not None and len(df_base) > 0:
             rw,rh = img_obj.size
             px = click["x"]*(rw/click["width"])
             py = click["y"]*(rh/click["height"])
             fx,fy = ax.transData.inverted().transform((px,rh-py))
-            df_sel = df_to_draw.copy()
+            df_sel = df_base.copy()
             df_sel["_dist"] = np.sqrt((df_sel.x_start-fx)**2+(df_sel.y_start-fy)**2)
             cands = df_sel[df_sel["_dist"]<5.0].sort_values("_dist")
             if not cands.empty:
                 selected_pass = cands.iloc[0]
         plt.close(fig)
 
-        if st.session_state["heat_sel_pm"] is not None:
-            sel = st.session_state["heat_sel_pm"]
-            n = int(((df_for_map["x_end"]>=sel["x0"])&(df_for_map["x_end"]<sel["x1"])
-                     &(df_for_map["y_end"]>=sel["y0"])&(df_for_map["y_end"]<sel["y1"])).sum())
+        st.divider()
+        st.subheader("Selected Event")
+        if selected_pass is None:
+            st.info("Click an origin marker on the map to inspect an event.")
+        else:
+            rank_txt = "—"
+            if pd.notna(selected_pass["rank_ΔxT"]):
+                rank_txt = f"#{int(selected_pass['rank_ΔxT'])}"
+
+            status = "✅ Completed" if selected_pass["is_won"] else "❌ Incomplete"
+            st.success(
+                f"Pass #{int(selected_pass['number'])} — {selected_pass['type']} | "
+                f"{status} | ΔxT rank: {rank_txt}"
+            )
+
+            c1,c2 = st.columns(2)
+            c1.write(f"**Origin:** ({selected_pass.x_start:.2f}, {selected_pass.y_start:.2f})")
+            c2.write(f"**Destination:** ({selected_pass.x_end:.2f}, {selected_pass.y_end:.2f})")
+
+            c3,c4,c5 = st.columns(3)
+            with c3: st.metric("xT start", f"{selected_pass.xt_start:.4f}")
+            with c4: st.metric("xT end", f"{selected_pass.xt_end:.4f}")
+            with c5: st.metric("ΔxT", f"{selected_pass['ΔxT']:.4f}")
+
+            p1,p2 = st.columns(2)
+            p1.write(f"**Pressure:** {selected_pass['pressure_tag']} ({selected_pass['pressure_label']})")
+            p2.write(f"**Pressure bonus:** {selected_pass['pressure_bonus']:.2f}")
+
+        with st.expander("📊 Full table"):
+            cols = ["number","seta","type","pressure_tag","pressure_label","outcome",
+                    "x_start","y_start","x_end","y_end","xt_start","xt_end","ΔxT","rank_ΔxT","pass_distance"]
+            st.dataframe(
+                df_base[cols].style.format({
+                    "x_start":"{:.2f}","y_start":"{:.2f}","x_end":"{:.2f}","y_end":"{:.2f}",
+                    "xt_start":"{:.4f}","xt_end":"{:.4f}","ΔxT":"{:.4f}",
+                    "rank_ΔxT":"{:.0f}","pass_distance":"{:.1f}"
+                }),
+                use_container_width=True,
+                height=420
+            )
+
+# =============================================================================
+# TAB: ANALYSIS
+# =============================================================================
+with tab_analysis:
+    st.caption("Heatmap and zone interactions are available in this tab.")
+    col_left, col_right = st.columns([2,1], gap="large")
+
+    with col_left:
+        # State reset for zone interaction
+        for key, default in [
+            ("heat_sel_analysis", None),
+            ("last_pressure_analysis", pressure_filter),
+        ]:
+            if key not in st.session_state:
+                st.session_state[key] = default
+        if st.session_state["last_pressure_analysis"] != pressure_filter:
+            st.session_state["heat_sel_analysis"] = None
+            st.session_state["last_pressure_analysis"] = pressure_filter
+
+        # Analysis df respects pressure filter
+        df_an = df.copy()
+        if pressure_filter != "All":
+            df_an = df_an[df_an["pressure_tag"] == pressure_filter].reset_index(drop=True)
+
+        st.markdown('<h4 style="color:#ffffff;margin:6px 0 6px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
+        heat_img, hax, hfig = draw_corridor_heatmap(df_an)
+        heat_click = streamlit_image_coordinates(heat_img, width=780, key="analysis_heat")
+        if heat_click is not None:
+            rw,rh = heat_img.size
+            px = heat_click["x"]*(rw/heat_click["width"])
+            py = heat_click["y"]*(rh/heat_click["height"])
+            fx,fy = hax.transData.inverted().transform((px,rh-py))
+
+            xb = np.linspace(0,FIELD_X,7)
+            ix = max(0,min(5,np.searchsorted(xb,fx,side="right")-1))
+            x0h,x1h = xb[ix],xb[ix+1]
+
+            if fy >= LANE_LEFT_MIN:
+                cn,y0h,y1h = "left", LANE_LEFT_MIN, FIELD_Y
+            elif fy < LANE_RIGHT_MAX:
+                cn,y0h,y1h = "right", 0.0, LANE_RIGHT_MAX
+            else:
+                cn,y0h,y1h = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
+
+            st.session_state["heat_sel_analysis"] = {
+                "ix":int(ix),"corridor":cn,
+                "x0":float(x0h),"x1":float(x1h),
+                "y0":float(y0h),"y1":float(y1h)
+            }
+        plt.close(hfig)
+
+        st.markdown('<h4 style="color:#ffffff;margin:14px 0 4px 0;">Top Zone Connections</h4>', unsafe_allow_html=True)
+        mini_img, _, mini_fig = draw_top_connection_minimaps(df_an, top_k=3)
+        st.image(mini_img, use_container_width=True)
+        plt.close(mini_fig)
+
+        st.markdown('<h4 style="color:#ffffff;margin:14px 0 6px 0;">Zone-filtered Map (All passes)</h4>', unsafe_allow_html=True)
+        if st.button("Clear Zone Filter", key="analysis_clear_zone"):
+            st.session_state["heat_sel_analysis"] = None
+
+        df_zone = df_an.copy()
+        if st.session_state["heat_sel_analysis"] is not None:
+            sel = st.session_state["heat_sel_analysis"]
+            df_zone = df_zone[
+                (df_zone["x_end"]>=sel["x0"])&(df_zone["x_end"]<sel["x1"])
+                &(df_zone["y_end"]>=sel["y0"])&(df_zone["y_end"]<sel["y1"])
+            ].reset_index(drop=True)
+
+        zone_map_img, _, zone_map_fig = draw_pass_map(df_zone, "All passes")
+        st.image(zone_map_img, use_container_width=True)
+        plt.close(zone_map_fig)
+
+        if st.session_state["heat_sel_analysis"] is not None:
+            sel = st.session_state["heat_sel_analysis"]
+            n = int(((df_an["x_end"]>=sel["x0"])&(df_an["x_end"]<sel["x1"])
+                     &(df_an["y_end"]>=sel["y0"])&(df_an["y_end"]<sel["y1"])).sum())
             st.markdown(
                 f"<div style='color:#ffffff;margin-top:6px;'>"
                 f"<strong>Zone filter active:</strong> channel <code>{sel['corridor']}</code>, "
@@ -692,149 +747,44 @@ with tab_passmap:
                 unsafe_allow_html=True
             )
 
-        st.divider()
-        st.subheader("Selected Event")
-        if selected_pass is None:
-            st.info("Click an origin dot on the pass map to inspect an event.")
-        else:
-            status = "✅ Completed" if selected_pass["is_won"] else "❌ Incomplete"
-            rank_txt = "-"
-            if pd.notna(selected_pass["rank_deltaxT"]):
-                rank_txt = f"#{int(selected_pass['rank_deltaxT'])}"
+    with col_right:
+        s = compute_stats(df_an)
 
-            top_tag = " · 🏅 Top 10" if int(selected_pass["number"]) in top10_ids else ""
-            st.success(
-                f"Pass #{int(selected_pass['number'])} — {selected_pass['type']} | "
-                f"{status}{top_tag} | Rank deltaxT: {rank_txt}"
-            )
-
-            c1,c2 = st.columns(2)
-            c1.write(f"**Origin:** ({selected_pass.x_start:.2f}, {selected_pass.y_start:.2f})")
-            c2.write(f"**Destination:** ({selected_pass.x_end:.2f}, {selected_pass.y_end:.2f})")
-
-            p1,p2 = st.columns(2)
-            p1.write(f"**Pressure:** {selected_pass['pressure_tag']} ({selected_pass['pressure_label']})")
-            p2.write(f"**Pressure Bonus:** {selected_pass['pressure_bonus']:.2f}")
-
-            m1,m2,m3 = st.columns(3)
-            with m1: st.metric("xT Start", f"{selected_pass.xt_start:.4f}")
-            with m2: st.metric("xT End", f"{selected_pass.xt_end:.4f}")
-            with m3: st.metric("deltaxT", f"{selected_pass.deltaxT:.4f}")
-
-            st.metric("Pass Distance", f"{selected_pass.pass_distance:.1f} m")
-
-        with st.expander("📊 Full Pass Data Table"):
-            dc = ["number","seta","type","pressure_tag","pressure_label","outcome",
-                  "x_start","y_start","x_end","y_end","xt_start","xt_end",
-                  "deltaxT","deltaxT_final","rank_deltaxT","pass_distance"]
-            st.dataframe(
-                df_to_draw[dc].style.format(
-                    {"x_start":"{:.2f}","y_start":"{:.2f}","x_end":"{:.2f}","y_end":"{:.2f}",
-                     "xt_start":"{:.4f}","xt_end":"{:.4f}","deltaxT":"{:.4f}",
-                     "deltaxT_final":"{:.4f}","rank_deltaxT":"{:.0f}","pass_distance":"{:.1f}"}
-                ),
-                use_container_width=True,height=420
-            )
-
-    with col_stats:
-        s = compute_stats(df_base)
-
-        with st.expander("📋 General Statistics",expanded=True):
-            st.markdown('<div class="stats-section-title">Overview</div>',unsafe_allow_html=True)
+        with st.expander("📋 General Stats", expanded=True):
+            st.markdown('<div class="stats-section-title">Overview</div>', unsafe_allow_html=True)
             r1,r2,r3 = st.columns(3)
-            with r1: small_metric("Total Passes", f"{s['total_passes']}")
-            with r2: small_metric("Completed", f"{s['completed_passes']}")
-            with r3: small_metric("Accuracy", f"{s['accuracy_pct']:.1f}%")
+            with r1: small_metric("Total passes", f"{s['total']}")
+            with r2: small_metric("Completed", f"{s['completed']}")
+            with r3: small_metric("Accuracy", f"{s['accuracy']:.1f}%")
 
-            st.markdown("<hr style='margin:6px 0 8px 0;'>",unsafe_allow_html=True)
-            x1,x2,x3 = st.columns(3)
-            with x1: small_metric("Σ deltaxT", f"{s['sum_deltaxT']:.3f}")
-            with x2: small_metric("Mean deltaxT", f"{s['mean_deltaxT']:.3f}")
-            with x3: small_metric(f"deltaxT ≥ {DELTA_XT_THRESHOLD:.2f}", f"{s['ge005_count']}")
+            st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+            x1,x2 = st.columns(2)
+            with x1: small_metric("Σ ΔxT", f"{s['sum_ΔxT']:.3f}")
+            with x2: small_metric("Mean ΔxT", f"{s['mean_ΔxT']:.3f}")
 
-            st.markdown("<hr style='margin:6px 0 8px 0;'>",unsafe_allow_html=True)
-            small_metric("Positive deltaxT", f"{s['positive_deltaxT_count']}")
+            st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+            g1,g2 = st.columns(2)
+            with g1: small_metric(f"ΔxT ≥ {DELTA_THR:.2f}", f"{s['cnt_ge']}")
+            with g2: small_metric("Share of total", f"{s['pct_ge']:.1f}%")
 
-        with st.expander("⚡ Pressure + deltaxT Detail", expanded=True):
-            byp = s["by_pressure"]
-            for _, row in byp.iterrows():
+        with st.expander("⚡ Pressure Stats", expanded=True):
+            for _, row in s["by_pressure"].iterrows():
                 st.markdown(
                     f"<div class='stats-section-title'>{row['pressure_tag']} — {row['pressure_label']}</div>",
                     unsafe_allow_html=True
                 )
-                p1,p2,p3 = st.columns(3)
-                with p1: small_metric("Total", f"{int(row['total'])}")
-                with p2: small_metric("Completed", f"{int(row['completed'])}")
-                with p3: small_metric("Accuracy", f"{float(row['accuracy_pct']):.1f}%")
-                q1,q2,q3 = st.columns(3)
-                with q1: small_metric("Σ deltaxT", f"{float(row['sum_deltaxT']):.3f}")
-                with q2: small_metric("Mean deltaxT", f"{float(row['mean_deltaxT']):.3f}")
-                with q3: small_metric(f"deltaxT ≥ {DELTA_XT_THRESHOLD:.2f}", f"{int(row['ge005'])}")
-                st.markdown("<hr style='margin:6px 0 8px 0;'>",unsafe_allow_html=True)
+                a1,a2,a3 = st.columns(3)
+                with a1: small_metric("Total", f"{int(row['total'])}")
+                with a2: small_metric("Completed", f"{int(row['completed'])}")
+                with a3: small_metric("Accuracy", f"{float(row['accuracy_pct']):.1f}%")
 
-        st.divider()
-        st.caption("Map rules: deltaxT < 0.05 removed (except incomplete and Top 10). "
-                   "Blue = completed, Red = incomplete, Gold = Top 10 deltaxT.")
+                b1,b2 = st.columns(2)
+                with b1: small_metric("Σ ΔxT", f"{float(row['sum_ΔxT']):.3f}")
+                with b2: small_metric("Mean ΔxT", f"{float(row['mean_ΔxT']):.3f}")
 
-# =============================================================================
-# TAB 2 - Analysis
-# =============================================================================
-with tab_analysis:
-    st.subheader("Top 20 by deltaxT")
-    top20 = (
-        df[df["is_won"]]
-        .sort_values("deltaxT", ascending=False)
-        .head(20)
-        .reset_index(drop=True)
-    )
-    top20["rank"] = np.arange(1, len(top20)+1)
+                c1,c2 = st.columns(2)
+                with c1: small_metric(f"ΔxT ≥ {DELTA_THR:.2f}", f"{int(row['ge_thr'])}")
+                with c2: small_metric("Share in pressure group", f"{float(row['ge_thr_pct_total']):.1f}%")
+                st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
 
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Total Passes", f"{len(df)}")
-    c2.metric("Completed", f"{int(df['is_won'].sum())}")
-    c3.metric("Σ deltaxT (Top20)", f"{top20['deltaxT'].sum():.3f}")
-    c4.metric("Mean deltaxT (Top20)", f"{top20['deltaxT'].mean() if len(top20)>0 else 0:.3f}")
-
-    st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Map — Top 20 deltaxT</h4>', unsafe_allow_html=True)
-    top20_img, top20_ax, top20_fig = draw_pass_map(top20, "Top 20 Passes by deltaxT", top10_ids=top10_ids)
-    top20_click = streamlit_image_coordinates(top20_img, width=980, key="top20_map_click")
-
-    top20_selected = None
-    if top20_click is not None and len(top20) > 0:
-        rw,rh = top20_img.size
-        px = top20_click["x"]*(rw/top20_click["width"])
-        py = top20_click["y"]*(rh/top20_click["height"])
-        fx,fy = top20_ax.transData.inverted().transform((px,rh-py))
-        df_sel = top20.copy()
-        df_sel["_dist"] = np.sqrt((df_sel.x_start-fx)**2+(df_sel.y_start-fy)**2)
-        cands = df_sel[df_sel["_dist"]<5.0].sort_values("_dist")
-        if not cands.empty:
-            top20_selected = cands.iloc[0]
-    plt.close(top20_fig)
-
-    if top20_selected is None:
-        st.info("Click an origin dot on the Top 20 map to inspect an event.")
-    else:
-        st.success(
-            f"Rank #{int(top20_selected['rank'])} — Pass #{int(top20_selected['number'])} "
-            f"| deltaxT: {top20_selected['deltaxT']:.4f}"
-        )
-        a1,a2,a3 = st.columns(3)
-        a1.write(f"**Origin:** ({top20_selected.x_start:.2f}, {top20_selected.y_start:.2f})")
-        a2.write(f"**Destination:** ({top20_selected.x_end:.2f}, {top20_selected.y_end:.2f})")
-        a3.write(f"**Pressure:** {top20_selected['pressure_tag']} ({top20_selected['pressure_label']})")
-
-    show_cols = [
-        "rank","number","seta","type","pressure_tag","pressure_label",
-        "x_start","y_start","x_end","y_end","xt_start","xt_end","deltaxT","deltaxT_final","pass_distance"
-    ]
-    st.dataframe(
-        top20[show_cols].style.format({
-            "x_start":"{:.2f}","y_start":"{:.2f}","x_end":"{:.2f}","y_end":"{:.2f}",
-            "xt_start":"{:.4f}","xt_end":"{:.4f}",
-            "deltaxT":"{:.4f}","deltaxT_final":"{:.4f}",
-            "pass_distance":"{:.1f}"
-        }),
-        use_container_width=True,
-        height=420
-    )
+        st.caption("Map modes: Top 10 by ΔxT, Errors only, or All passes.")
