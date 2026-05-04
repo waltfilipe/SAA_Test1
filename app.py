@@ -193,7 +193,6 @@ def clip_pitch(x, y):
     return float(np.clip(x, 0.0, FIELD_X)), float(np.clip(y, 0.0, FIELD_Y))
 
 def choose_pressure_tag(rng):
-    # distribuição plausível: mais 0-0 e 1-0; menos 1-1
     tags = ["0-0", "1-0", "0-1", "1-1"]
     probs = [0.42, 0.28, 0.20, 0.10]
     return rng.choice(tags, p=probs)
@@ -202,15 +201,13 @@ def generate_rb_passes(n=250, seed=42):
     rng = np.random.default_rng(seed)
     rows = []
 
-    # tipos de passe típicos de lateral direito
-    # weights somam 1.0
     pass_types = [
-        ("recycle_back", 0.26),      # recuo / segurança
-        ("line_up_right", 0.24),     # progressão no corredor
-        ("inside_link", 0.18),       # passe por dentro
-        ("switch_diagonal", 0.10),   # virada longa
-        ("final_third_cross", 0.12), # cruzamento/bola na área
-        ("underlap_cutback", 0.10),  # infiltração e passe atrás
+        ("recycle_back", 0.26),
+        ("line_up_right", 0.24),
+        ("inside_link", 0.18),
+        ("switch_diagonal", 0.10),
+        ("final_third_cross", 0.12),
+        ("underlap_cutback", 0.10),
     ]
     names = [p[0] for p in pass_types]
     probs = [p[1] for p in pass_types]
@@ -218,7 +215,6 @@ def generate_rb_passes(n=250, seed=42):
     for i in range(n):
         ptype = rng.choice(names, p=probs)
 
-        # origem típica de lateral direito (lado direito alto de y no statsbomb)
         if ptype == "recycle_back":
             x0 = rng.uniform(35, 80)
             y0 = rng.uniform(62, 79)
@@ -259,12 +255,26 @@ def generate_rb_passes(n=250, seed=42):
 
         pressure_tag = choose_pressure_tag(rng)
 
-        # modelo simples de sucesso: cai com pressão e distância
         dist = float(np.hypot(x1 - x0, y1 - y0))
         base_success = 0.88
         pressure_penalty = {"0-0": 0.00, "1-0": 0.06, "0-1": 0.06, "1-1": 0.12}[pressure_tag]
         dist_penalty = 0.10 if dist > 30 else (0.05 if dist > 20 else 0.0)
-        success_prob = np.clip(base_success - pressure_penalty - dist_penalty, 0.45, 0.95)
+
+        # AJUSTE: maior dificuldade no terço final
+        # - origem no terço final: penaliza mais
+        # - destino no terço final: penaliza um pouco mais ainda
+        start_final_third_penalty = 0.05 if x0 >= FINAL_THIRD_LINE_X else 0.0
+        end_final_third_penalty = 0.07 if x1 >= FINAL_THIRD_LINE_X else 0.0
+
+        success_prob = np.clip(
+            base_success
+            - pressure_penalty
+            - dist_penalty
+            - start_final_third_penalty
+            - end_final_third_penalty,
+            0.35, 0.95
+        )
+
         is_won = bool(rng.random() < success_prob)
 
         rows.append(
@@ -591,6 +601,9 @@ with tab_mapa:
         st.caption(
             "Mapa: cinza fraco = ΔxT ≤ 0 · azul fraco = ΔxT > 0 · vermelho fraco = passe errado"
         )
+        st.caption(
+            "Dificuldade extra no terço final: penalização adicional de acerto na origem e no destino no terço final."
+        )
 
 # =============================================================================
 # TAB 2 - Análise
@@ -612,12 +625,43 @@ with tab_analise:
     c3.metric("Σ ΔxT (Top20)", f"{top20['delta_xt_final'].sum():.3f}")
     c4.metric("Média ΔxT (Top20)", f"{top20['delta_xt_final'].mean() if len(top20)>0 else 0:.3f}")
 
+    st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Mapa — Top 20 ΔxT</h4>', unsafe_allow_html=True)
+    top20_map_img, top20_ax, top20_fig = draw_pass_map(top20, "Top 20 Passes por ΔxT final")
+    top20_click = streamlit_image_coordinates(top20_map_img, width=980, key="top20_map_click")
+
+    top20_selected = None
+    if top20_click is not None and len(top20) > 0:
+        rw, rh = top20_map_img.size
+        px = top20_click["x"] * (rw / top20_click["width"])
+        py = top20_click["y"] * (rh / top20_click["height"])
+        fx, fy = top20_ax.transData.inverted().transform((px, rh - py))
+        df_sel = top20.copy()
+        df_sel["_dist"] = np.sqrt((df_sel.x_start - fx)**2 + (df_sel.y_start - fy)**2)
+        cands = df_sel[df_sel["_dist"] < 5.0].sort_values("_dist")
+        if not cands.empty:
+            top20_selected = cands.iloc[0]
+    plt.close(top20_fig)
+
+    if top20_selected is None:
+        st.info("Clique em um ponto de origem no mapa Top 20 para inspecionar o passe.")
+    else:
+        st.success(
+            f"Top #{int(top20_selected['rank'])} — {top20_selected['seta']} | "
+            f"{top20_selected['pressure_tag']} ({top20_selected['pressure_label']})"
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        s1.write(f"**Origem:** ({top20_selected.x_start:.2f}, {top20_selected.y_start:.2f})")
+        s2.write(f"**Destino:** ({top20_selected.x_end:.2f}, {top20_selected.y_end:.2f})")
+        s3.metric("ΔxT final", f"{top20_selected.delta_xt_final:.4f}")
+        s4.metric("Perfil", f"{top20_selected.profile}")
+
     show_cols = [
         "rank","number","seta","type","profile","pressure_tag","pressure_label",
         "x_start","y_start","x_end","y_end",
         "xt_start","xt_end","delta_xt_raw","pressure_bonus","delta_xt_final","pass_distance"
     ]
 
+    st.markdown("#### Tabela — Top 20 ΔxT")
     st.dataframe(
         top20[show_cols].style.format({
             "x_start":"{:.2f}","y_start":"{:.2f}",
@@ -629,15 +673,5 @@ with tab_analise:
             "pass_distance":"{:.1f}"
         }),
         use_container_width=True,
-        height=520
+        height=420
     )
-
-    st.markdown("#### Coordenadas dos Top 20")
-    coords_txt = []
-    for _, r in top20.iterrows():
-        coords_txt.append(
-            f"#{int(r['rank'])} | {r['seta']} | {r['pressure_tag']} | "
-            f"({r['x_start']:.2f}, {r['y_start']:.2f}) -> ({r['x_end']:.2f}, {r['y_end']:.2f}) | "
-            f"ΔxTfinal={r['delta_xt_final']:.4f}"
-        )
-    st.code("\n".join(coords_txt) if coords_txt else "Sem dados.", language="text")
